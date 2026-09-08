@@ -1,80 +1,19 @@
-import { useEffect, useState } from 'react';
-
-import { useMeta, ModeBanner } from './shell';
+import { useMeta } from './shell';
 import { OnePage } from './pages/OnePage';
+import { ChatPanel } from './pages/ChatPanel';
 
 export default function App() {
-  const { meta, refresh } = useMeta();
-  void refresh; // meta refreshes on mount; no multi-page nav anymore
-
+  const { meta } = useMeta();
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-name">Civicfolio</div>
-          <div className="brand-sub">disclosure research · daily</div>
-        </div>
-        <SectionNav />
-        <div className="sidebar-footer">
-          <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>
-            {meta ? `${meta.counts.watchlist} watched · live market data` : 'loading…'}
-          </span>
-        </div>
-      </aside>
       <main className="main">
-        <ModeBanner meta={meta} />
         <OnePage />
       </main>
+      <aside className="chat-side">
+        <ChatPanel />
+      </aside>
+      {/* meta is loaded for the data dir shown in settings-less builds */}
+      <span hidden>{meta?.data_dir}</span>
     </div>
-  );
-}
-
-
-const SECTIONS = [
-  { id: 'movers', label: 'Market movers' },
-  { id: 'watchlist', label: 'My watchlist' },
-  { id: 'ask', label: 'Ask' },
-];
-
-function SectionNav() {
-  const [active, setActive] = useState('proposals');
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        // Topmost visible section wins, so the highlight tracks reading position
-        // rather than flickering between whichever fired last.
-        const visible = entries
-          .filter((e) => e.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-        if (visible) setActive(visible.target.id);
-      },
-      { rootMargin: '-80px 0px -60% 0px', threshold: 0 },
-    );
-    for (const s of SECTIONS) {
-      const el = document.getElementById(s.id);
-      if (el) observer.observe(el);
-    }
-    return () => observer.disconnect();
-  }, []);
-
-  return (
-    <nav className="section-nav" aria-label="Sections">
-      {SECTIONS.map((s) => (
-        <a
-          key={s.id}
-          href={`#${s.id}`}
-          className={`section-link${active === s.id ? ' active' : ''}`}
-          aria-current={active === s.id ? 'true' : undefined}
-          // No preventDefault: the native anchor jump always works, including
-          // where smooth scrolling is disabled or unavailable. CSS handles the
-          // easing. Setting active here is just immediate feedback before the
-          // observer catches up.
-          onClick={() => setActive(s.id)}
-        >
-          {s.label}
-        </a>
-      ))}
-    </nav>
   );
 }

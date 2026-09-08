@@ -29,6 +29,7 @@ export function emptyData(): AppData {
     watchlist: [],
     ideas: [],
     trades: [],
+    verdict_log: [],
     portfolio: emptyPortfolio(),
     chat: [],
     meta: { schema_version: 2 },
@@ -88,8 +89,13 @@ export function load(): AppData {
         watchlist: Array.isArray(parsed.watchlist) ? (parsed.watchlist as WatchlistItem[]) : base.watchlist,
         ideas: Array.isArray(parsed.ideas) ? (parsed.ideas as TrackedIdea[]) : base.ideas,
         trades: Array.isArray(parsed.trades) ? (parsed.trades as PaperTrade[]) : base.trades,
+        verdict_log: Array.isArray(parsed.verdict_log) ? (parsed.verdict_log as AppData['verdict_log']) : base.verdict_log,
         portfolio: sanitizePortfolio(parsed.portfolio),
-        chat: Array.isArray(parsed.chat) ? (parsed.chat as ChatMessage[]) : base.chat,
+        // Answers written by the retired disclosure engine describe a system
+        // that no longer exists; drop them rather than show contradictions.
+        chat: Array.isArray(parsed.chat)
+          ? (parsed.chat as ChatMessage[]).filter((m) => !/stored disclosure activity|demo \/ \d+ imported/i.test(String(m.content ?? '')))
+          : base.chat,
         meta: parsed.meta && typeof parsed.meta === 'object' ? { ...base.meta, ...parsed.meta } : base.meta,
       };
       cache = data;

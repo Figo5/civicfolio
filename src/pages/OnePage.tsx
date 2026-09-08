@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type Mover, type TickerSnapshot, type AgentVerdict, type ChatMessage } from '../api';
+import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea } from '../api';
 
 const MOVER_TABS = [
   { kind: 'most_actives' as const, label: 'Most active' },
@@ -70,10 +70,9 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
   const [verdict, setVerdict] = useState<AgentVerdict | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [added, setAdded] = useState(false);
 
   useEffect(() => {
-    setSnap(null); setVerdict(null); setErr(null); setAdded(false);
+    setSnap(null); setVerdict(null); setErr(null);
     api.snapshot(ticker).then(setSnap).catch((e) => setErr(String((e as Error).message ?? e)));
   }, [ticker]);
 
@@ -95,10 +94,6 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
           {snap?.sector && <span className="badge neutral" style={{ marginLeft: 8 }}>{snap.sector}</span>}
         </p>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn small" type="button" disabled={added}
-            onClick={async () => { await api.addWatch(ticker, 'Added from market movers').catch(() => {}); setAdded(true); }}>
-            {added ? 'On watchlist' : 'Watch'}
-          </button>
           <button className="btn small teal" type="button" onClick={runResearch} disabled={busy}>
             {busy ? 'Researching…' : 'Research with AI'}
           </button>
@@ -193,65 +188,84 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
   );
 }
 
-function Chat() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [modeAvailable, setModeAvailable] = useState(false);
-  const [mode, setMode] = useState<'deterministic' | 'llm'>('deterministic');
-  const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    api.chat().then((r) => { setMessages(r.messages.slice(-30)); setModeAvailable(r.mode_available); }).catch(() => {});
-  }, []);
+function IdeaCard({ idea, onOpen }: { idea: ScoredIdea; onOpen: (t: string) => void }) {
+  return (
+    <div className="idea">
+      <div className="idea-head">
+        <button className="ticker-tag link" type="button" onClick={() => onOpen(idea.ticker)}>{idea.ticker}</button>
+        <span className={`idea-move ${typeof idea.change_pct === 'number' && idea.change_pct >= 0 ? 'pl-up' : 'pl-down'}`}>
+          {pct(idea.change_pct)}
+        </span>
+        <span className="muted">{money(idea.price)}</span>
+        <span className="idea-score" title="Screen score: arithmetic over the facts listed below, not a prediction">
+          {idea.score}
+        </span>
+      </div>
+      <div className="idea-name">{idea.name}</div>
+      <ul className="tight-list">
+        {idea.reasons.slice(0, 3).map((r, i) => <li key={i}>{r}</li>)}
+        {idea.cautions.slice(0, 2).map((c, i) => <li key={`c${i}`} className="caution">{c}</li>)}
+      </ul>
+    </div>
+  );
+}
 
-  const ask = async () => {
-    const question = input.trim();
-    if (!question || busy) return;
-    setBusy(true);
-    setMessages((m) => [...m, { role: 'user', content: question, ts: new Date().toISOString() }]);
-    setInput('');
-    try {
-      const res = await api.ask(question, mode, mode === 'llm');
-      setMessages((m) => [...m, res.message]);
-    } catch (e) {
-      setMessages((m) => [...m, { role: 'assistant', content: String((e as Error).message ?? e), ts: new Date().toISOString() }]);
-    } finally { setBusy(false); }
+function Insights({ onOpen }: { onOpen: (t: string) => void }) {
+  const [board, setBoard] = useState<InsightBoard | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    api.insights().then(setBoard).catch((e) => setErr(String((e as Error).message ?? e))).finally(() => setLoading(false));
   };
+  useEffect(load, []);
 
   return (
-    <div className="card" id="ask">
+    <div className="card" id="insights">
       <div className="section-head">
-        <p className="card-title" style={{ margin: 0 }}>Ask</p>
-        {messages.length > 0 && (
-          <button className="btn small" type="button" style={{ marginLeft: 'auto', marginRight: 8 }}
-            onClick={async () => { await api.clearChat().catch(() => {}); setMessages([]); }}>
-            Clear history
-          </button>
-        )}
-        <select value={mode} onChange={(e) => setMode(e.target.value as 'deterministic' | 'llm')} style={{ width: 'auto' }}>
-          <option value="deterministic">Local engine (no key)</option>
-          {modeAvailable && <option value="llm">LLM (configured)</option>}
-        </select>
+        <p className="card-title" style={{ margin: 0 }}>Today&apos;s ideas</p>
+        <button className="btn small" type="button" onClick={load} disabled={loading}>
+          {loading ? 'Screening…' : 'Refresh'}
+        </button>
       </div>
 
-      <div className="chat-log">
-        {messages.length === 0 && (
-          <div className="empty-state">
-            Ask about a quote, your positions, or your watchlist. For a buy/sell view with levels, use
-            <b> Research with AI</b> on a ticker.
-          </div>
-        )}
-        {messages.map((m, i) => (
-          <div key={i} className={`chat-msg ${m.role}`}><div className="chat-bubble">{m.content}</div></div>
-        ))}
-      </div>
+      {err && <div className="error-text">{err}</div>}
+      {loading && !board && <div className="empty-state">Screening the market…</div>}
 
-      <div className="chat-input-row">
-        <input placeholder="e.g. how is my portfolio doing?" value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') void ask(); }} />
-        <button className="btn primary" type="button" onClick={ask} disabled={busy}>{busy ? '…' : 'Ask'}</button>
-      </div>
+      {board && (
+        <>
+          <p className="card-title sub">Best scoring ({board.best_buys.length})</p>
+          {board.best_buys.length === 0
+            ? <div className="empty-state">Nothing cleared the threshold today.</div>
+            : <div className="idea-grid">{board.best_buys.map((i) => <IdeaCard key={i.ticker} idea={i} onOpen={onOpen} />)}</div>}
+
+          {board.watch.length > 0 && (
+            <>
+              <p className="card-title sub">Worth watching</p>
+              <div className="idea-grid">{board.watch.map((i) => <IdeaCard key={i.ticker} idea={i} onOpen={onOpen} />)}</div>
+            </>
+          )}
+
+          {board.earnings_soon.length > 0 && (
+            <>
+              <p className="card-title sub">Reporting within two weeks</p>
+              <div className="chips">
+                {board.earnings_soon.map((i) => (
+                  <button key={i.ticker} className="chip" type="button" onClick={() => onOpen(i.ticker)}>
+                    {i.ticker} <span className="muted">{i.earnings_in_days}d</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          <p className="provenance">
+            {board.notes.join(' ')} Open one and hit <b>Research with AI</b> for a view with levels.
+          </p>
+        </>
+      )}
     </div>
   );
 }
@@ -263,7 +277,6 @@ export function OnePage() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [lookup, setLookup] = useState('');
-  const [watchlist, setWatchlist] = useState<{ id: string; ticker: string; thesis: string }[]>([]);
   const [fetchedAt, setFetchedAt] = useState<string | null>(null);
 
   useEffect(() => {
@@ -274,24 +287,19 @@ export function OnePage() {
       .finally(() => setLoading(false));
   }, [tab]);
 
-  useEffect(() => { api.watchlist().then((r) => setWatchlist(r.items)).catch(() => {}); }, [selected]);
-
   const openTicker = (t: string) => {
-    setSelected(t.toUpperCase());
+    const up = t.toUpperCase();
+    setSelected(up);
+    // Point the side chat at this stock's thread.
+    window.dispatchEvent(new CustomEvent('civicfolio:ticker', { detail: up }));
     requestAnimationFrame(() => document.getElementById('detail')?.scrollIntoView({ block: 'start' }));
   };
 
   return (
     <div>
-      <div className="page-header">
-        <h1 className="page-title">Civicfolio</h1>
-        <p className="page-sub">
-          Live market tracker — what is moving, what is reporting, and what the news says. Ask the AI for a view,
-          then take the decision to your brokerage. Not advice.
-        </p>
-      </div>
-
       {error && <div className="error-text">{error}</div>}
+
+      <Insights onOpen={openTicker} />
 
       <div className="card" id="movers">
         <div className="section-head">
@@ -358,34 +366,6 @@ export function OnePage() {
         {selected && <TickerDetail ticker={selected} onClose={() => setSelected(null)} />}
       </div>
 
-      <div className="card" id="watchlist">
-        <p className="card-title">My watchlist</p>
-        {watchlist.length === 0 ? (
-          <div className="empty-state">Nothing watched yet — open a ticker and hit Watch.</div>
-        ) : (
-          <table className="table">
-            <thead><tr><th>Ticker</th><th>Note</th><th></th></tr></thead>
-            <tbody>
-              {watchlist.map((w) => (
-                <tr key={w.id}>
-                  <td><span className="ticker-tag">{w.ticker}</span></td>
-                  <td className="col-name">{w.thesis}</td>
-                  <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    <button className="btn small" type="button" onClick={() => openTicker(w.ticker)}>Open</button>{' '}
-                    <button className="btn small danger" type="button"
-                      onClick={async () => {
-                        await api.removeWatch(w.id).catch(() => {});
-                        setWatchlist((list) => list.filter((x) => x.id !== w.id));
-                      }}>Remove</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      <Chat />
     </div>
   );
 }

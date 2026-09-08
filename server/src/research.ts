@@ -50,7 +50,7 @@ const STOPWORDS = new Set([
   'WORTH', 'MUCH', 'MANY', 'ANY', 'ALL', 'NOT', 'NO', 'YES', 'OK', 'HOLD', 'ABOUT',
 ]);
 
-export async function answerQuestion(question: string, data: AppData): Promise<EngineAnswer> {
+export async function answerQuestion(question: string, data: AppData, threadTicker?: string): Promise<EngineAnswer> {
   const q = question.toLowerCase();
 
   // Explicit refusal: prediction is not something arithmetic can supply.
@@ -148,7 +148,10 @@ export async function answerQuestion(question: string, data: AppData): Promise<E
   // /[A-Z]+/ scan turns "what is the price of X" into a lookup for WHAT, THE
   // and OF. Filter aggressively; a missed ticker just falls through to help,
   // whereas a false one produces four confusing "no quote" lines.
-  const candidates = tickers.filter((t) => !STOPWORDS.has(t));
+  let candidates = tickers.filter((t) => !STOPWORDS.has(t));
+  // Inside a stock's thread, a bare "quote" or "how's it doing" means THAT
+  // stock. Without this the thread context is decorative.
+  if (candidates.length === 0 && threadTicker) candidates = [threadTicker];
   if (candidates.length > 0) {
     const { quotes, failed } = await getQuotes(candidates.slice(0, 5));
     if (quotes.length === 0) {

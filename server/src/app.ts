@@ -7,6 +7,7 @@ import { submitTrade, setMark, addIdea, addWatchlistItem, removeIdea, removeWatc
 import { getLlmConfig, callLlm, buildStoreContext } from './llm.js';
 import { getQuotes } from './quotes.js';
 import { getMovers, getPriceHistory, getTickerNews, type MoverKind } from './market.js';
+import { buildInsights } from './insights.js';
 import { getFundamentals } from './fundamentals.js';
 import { runResearchAgent, getAgentConfig, verifyLevels } from './ollamaAgent.js';
 import { cleanText } from './validate.js';
@@ -195,8 +196,42 @@ export function createApp(): express.Express {
         fifty_two_week_low: mover?.fifty_two_week_low ?? null,
       },
     );
+    // Record the call with the price it was made at. Without that snapshot,
+    // asking later whether the advice was any good is unanswerable.
+    const checks = v.level_checks ?? [];
+    update((draft) => {
+      draft.verdict_log.push({
+        id: `vl-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        ticker,
+        verdict: v.verdict,
+        confidence: v.confidence,
+        price_at_call: quote?.price ?? history?.last_close ?? null,
+        entry_zone: v.entry_zone,
+        exit_target: v.exit_target,
+        stop_loss: v.stop_loss,
+        hold_horizon: v.hold_horizon,
+        grounded_levels: checks.filter((c) => c.grounded).length,
+        unsupported_levels: checks.filter((c) => !c.grounded).length,
+        model: v.model,
+        created_at: new Date().toISOString(),
+      });
+      // Keep the log bounded; this is a personal tool, not an archive.
+      if (draft.verdict_log.length > 500) draft.verdict_log = draft.verdict_log.slice(-500);
+      return { committed: true, value: null };
+    });
+
     researchCache.set(ticker, { at: Date.now(), verdict: v });
     res.json({ verdict: v, cached: false });
+  });
+
+  // Daily screen: arithmetic over observable facts, no model involved.
+  app.get('/api/insights', async (_req, res) => {
+    res.json(await buildInsights());
+  });
+
+  // Recommendations as they were made, so they can be scored later.
+  app.get('/api/verdict-log', (_req, res) => {
+    res.json({ entries: [...data().verdict_log].reverse().slice(0, 200) });
   });
 
   // ---- live market ----
@@ -247,9 +282,22 @@ export function createApp(): express.Express {
   });
 
   // ---- chat ----
-  app.get('/api/chat', (_req, res) => {
+  app.get('/api/chat', (req, res) => {
     const d = data();
-    res.json({ mode_available: getLlmConfig().enabled, messages: d.chat.slice(-100) });
+    const ticker = typeof req.query.ticker === 'string' ? req.query.ticker.trim().toUpperCase() : '';
+    const all = d.chat;
+    // Threads are keyed by ticker; the general thread is everything untagged.
+    const messages = ticker
+      ? all.filter((m) => (m.ticker ?? '') === ticker)
+      : all.filter((m) => !m.ticker);
+    const threads = [...new Set(all.map((m) => m.ticker).filter((t): t is string => !!t))]
+      .map((t) => ({
+        ticker: t,
+        messages: all.filter((m) => m.ticker === t).length,
+        last_at: all.filter((m) => m.ticker === t).slice(-1)[0]?.ts ?? null,
+      }))
+      .sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
+    res.json({ mode_available: getLlmConfig().enabled, ticker: ticker || null, messages: messages.slice(-100), threads });
   });
 
   app.post('/api/chat', async (req, res) => {
@@ -257,6 +305,9 @@ export function createApp(): express.Express {
     const question = cleanText(body.question, 2000);
     if (!question) return fail(res, 400, 'question is required');
     const mode = body.mode === 'llm' ? 'llm' : 'deterministic';
+    const thread = typeof body.ticker === 'string' && /^[A-Za-z]{1,10}$/.test(body.ticker.trim())
+      ? body.ticker.trim().toUpperCase()
+      : undefined;
     const d = data();
 
     if (mode === 'llm') {
@@ -291,7 +342,7 @@ export function createApp(): express.Express {
       });
       const llmRes = await callLlm(cfg, question, ctx);
       if (!llmRes.ok) return fail(res, 502, llmRes.error ?? 'LLM request failed');
-      const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString() };
+      const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString(), ...(thread ? { ticker: thread } : {}) };
       const msg: ChatMessage = {
         role: 'assistant', content: llmRes.content ?? '', mode: 'llm',
         citations: (llmRes.citations ?? []).map((c) => ({ record_id: c.record_id, source_url: null, source_name: c.source_name })),
@@ -306,9 +357,9 @@ export function createApp(): express.Express {
       return res.json({ message: msg });
     }
 
-    const ans = await answerQuestion(question, d);
-    const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString() };
-    const msg: ChatMessage = { role: 'assistant', content: ans.content, citations: ans.citations, mode: 'deterministic', ts: new Date().toISOString() };
+    const ans = await answerQuestion(question, d, thread);
+    const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString(), ...(thread ? { ticker: thread } : {}) };
+    const msg: ChatMessage = { role: 'assistant', content: ans.content, citations: ans.citations, mode: 'deterministic', ts: new Date().toISOString(), ...(thread ? { ticker: thread } : {}) };
     update((draft) => {
       draft.chat.push(userMsg, msg);
       return { committed: true, value: undefined as void };
@@ -319,11 +370,14 @@ export function createApp(): express.Express {
   // Chat history is append-only and survives data reimports, so old answers
   // ("no data about MSFT") linger after the store has changed and read as
   // current. Let it be cleared without wiping the whole store.
-  app.delete('/api/chat', (_req, res) => {
+  app.delete('/api/chat', (req, res) => {
+    const ticker = typeof req.query.ticker === 'string' ? req.query.ticker.trim().toUpperCase() : '';
     const removed = update((draft) => {
-      const n = draft.chat.length;
-      draft.chat = [];
-      return { committed: n > 0, value: n };
+      const before = draft.chat.length;
+      draft.chat = ticker
+        ? draft.chat.filter((m) => (m.ticker ?? '') !== ticker)
+        : draft.chat.filter((m) => !!m.ticker); // clearing "general" keeps threads
+      return { committed: before !== draft.chat.length, value: before - draft.chat.length };
     });
     res.json({ ok: true, removed });
   });

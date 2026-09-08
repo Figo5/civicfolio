@@ -57,6 +57,9 @@ export interface ChatCitation {
 }
 
 export interface ChatMessage {
+  // Which stock this message belongs to. Threads are keyed by ticker so a
+  // conversation about NVDA never bleeds into one about AMD.
+  ticker?: string;
   role: 'user' | 'assistant';
   content: string;
   citations?: ChatCitation[];
@@ -64,7 +67,27 @@ export interface ChatMessage {
   ts: string;
 }
 
+/** A recommendation as it stood when made, so it can be scored later. */
+export interface VerdictLogEntry {
+  id: string;
+  ticker: string;
+  verdict: string;
+  confidence: string;
+  // The price at the moment of the call — without it, "was this right?" is
+  // unanswerable after the fact.
+  price_at_call: number | null;
+  entry_zone: string | null;
+  exit_target: string | null;
+  stop_loss: string | null;
+  hold_horizon: string | null;
+  grounded_levels: number;
+  unsupported_levels: number;
+  model: string;
+  created_at: string;
+}
+
 export interface AppData {
+  verdict_log: VerdictLogEntry[];
   watchlist: WatchlistItem[];
   ideas: TrackedIdea[];
   trades: PaperTrade[];

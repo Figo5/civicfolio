@@ -641,3 +641,78 @@ test('verifyLevels catches levels the data does not support', async () => {
   // Nulls are skipped entirely.
   assert.equal(verifyLevels({ entry_zone: null }, anchors).length, 0);
 });
+
+test('chat threads keep stocks separate and clear independently', async () => {
+  await agent().delete('/api/chat');
+
+  await postJson('/api/chat', { question: 'quote NVDA', ticker: 'nvda' });
+  await postJson('/api/chat', { question: 'quote AMD', ticker: 'AMD' });
+  await postJson('/api/chat', { question: 'show my trades' }); // general, untagged
+
+  const nvda = await agent().get('/api/chat?ticker=NVDA');
+  assert.equal(nvda.body.ticker, 'NVDA');
+  assert.ok(nvda.body.messages.length >= 2, 'question and answer land in the thread');
+  assert.ok(nvda.body.messages.every((m: { ticker?: string }) => m.ticker === 'NVDA'), 'no bleed from other stocks');
+
+  // General holds only untagged messages.
+  const general = await agent().get('/api/chat');
+  assert.ok(general.body.messages.every((m: { ticker?: string }) => !m.ticker));
+
+  const tickers = general.body.threads.map((t: { ticker: string }) => t.ticker).sort();
+  assert.deepEqual(tickers, ['AMD', 'NVDA'], 'both threads are listed');
+
+  // Clearing one thread leaves the others intact.
+  const cleared = await agent().delete('/api/chat?ticker=NVDA');
+  assert.ok(cleared.body.removed >= 2);
+  assert.equal((await agent().get('/api/chat?ticker=NVDA')).body.messages.length, 0);
+  assert.ok((await agent().get('/api/chat?ticker=AMD')).body.messages.length >= 2, 'AMD survived');
+});
+
+test('insight scoring is transparent and never fabricates', async () => {
+  const { scoreIdea } = await import('../src/insights.js');
+  const base = {
+    ticker: 'TEST', name: 'Test Co', price: 100, change: 0, change_pct: 0,
+    volume: null, avg_volume_3m: null, volume_vs_avg: null, market_cap: 5e9, forward_pe: null,
+    fifty_two_week_low: 50, fifty_two_week_high: 150, range_position: 0.5,
+    fifty_day_change_pct: null, two_hundred_day_change_pct: null,
+    next_earnings: null, earnings_is_estimate: false,
+    exchange: 'NYSE', delayed_by_seconds: 0, quote_source: 'test',
+  };
+
+  // A quiet, mid-range stock earns nothing.
+  assert.equal(scoreIdea({ ...base }).score, 0);
+
+  // Every point comes with the fact that produced it.
+  const heavy = scoreIdea({ ...base, volume_vs_avg: 3.1 });
+  assert.ok(heavy.score > 0);
+  assert.match(heavy.reasons.join(' '), /3\.10x/);
+
+  // Risky setups are scored but flagged, never silently rewarded.
+  const topOfRange = scoreIdea({ ...base, range_position: 0.95 });
+  assert.ok(topOfRange.cautions.some((c) => /52-week extreme/i.test(c)));
+
+  const spike = scoreIdea({ ...base, change_pct: 14 });
+  assert.ok(spike.cautions.some((c) => /buy the top/i.test(c)));
+
+  // Thin participation is a caution, not a reason.
+  const thin = scoreIdea({ ...base, volume_vs_avg: 0.4 });
+  assert.equal(thin.reasons.length, 0);
+  assert.ok(thin.cautions.some((c) => /thin participation/i.test(c)));
+
+  // Score is bounded and no field is invented from missing data.
+  const maxed = scoreIdea({ ...base, volume_vs_avg: 9, range_position: 0.05, change_pct: -20, forward_pe: 9 });
+  assert.ok(maxed.score <= 100);
+  assert.equal(scoreIdea({ ...base }).next_earnings, null);
+});
+
+test('a bare question inside a stock thread resolves to that stock', async () => {
+  await agent().delete('/api/chat?ticker=NVDA');
+  // "quote" alone carries no ticker; the thread has to supply it.
+  const inThread = await postJson('/api/chat', { question: 'quote', ticker: 'NVDA' });
+  assert.equal(inThread.status, 200);
+  assert.match(inThread.body.message.content, /NVDA/, 'thread ticker resolved the bare question');
+
+  // The same question with no thread has nothing to resolve against.
+  const general = await postJson('/api/chat', { question: 'quote' });
+  assert.doesNotMatch(general.body.message.content, /^- NVDA/m);
+});

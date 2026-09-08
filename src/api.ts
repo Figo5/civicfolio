@@ -92,12 +92,17 @@ function del<T>(url: string): Promise<T> {
 export const api = {
   meta: () => get<Meta>('/api/meta'),
   settings: () => get<SettingsResponse>('/api/settings'),
-  chat: () => get<{ mode_available: boolean; messages: ChatMessage[] }>('/api/chat'),
-  clearChat: () => del<{ ok: boolean; removed: number }>('/api/chat'),
+  chat: (ticker?: string) =>
+    get<{ mode_available: boolean; ticker: string | null; messages: ChatMessage[]; threads: ChatThread[] }>(
+      `/api/chat${ticker ? `?ticker=${encodeURIComponent(ticker)}` : ''}`),
+  clearChat: (ticker?: string) =>
+    del<{ ok: boolean; removed: number }>(`/api/chat${ticker ? `?ticker=${encodeURIComponent(ticker)}` : ''}`),
+  insights: () => get<InsightBoard>('/api/insights'),
+  verdictLog: () => get<{ entries: VerdictLogEntry[] }>('/api/verdict-log'),
   fundamentals: (ticker: string) =>
     get<{ fundamentals: Fundamentals }>(`/api/fundamentals?ticker=${encodeURIComponent(ticker)}`),
-  ask: (question: string, mode: 'deterministic' | 'llm', includePortfolio = false) =>
-    post<{ message: ChatMessage }>('/api/chat', { question, mode, include_portfolio: includePortfolio }),
+  ask: (question: string, mode: 'deterministic' | 'llm', includePortfolio = false, ticker?: string) =>
+    post<{ message: ChatMessage }>('/api/chat', { question, mode, include_portfolio: includePortfolio, ticker }),
   portfolio: () => get<PortfolioSummary>('/api/portfolio'),
   trades: () => get<{ trades: PaperTrade[] }>('/api/portfolio/trades'),
   setMark: (ticker: string, price: number | null) =>
@@ -164,4 +169,26 @@ export interface AgentVerdict {
   sources: { title: string; url: string; snippet?: string }[];
   level_checks?: LevelCheck[];
   model: string; searches_used: number; generated_at: string;
+}
+
+export interface ChatThread { ticker: string; messages: number; last_at: string | null }
+
+export interface ScoredIdea {
+  ticker: string; name: string; price: number | null; change_pct: number | null;
+  score: number; reasons: string[]; cautions: string[];
+  next_earnings: string | null; earnings_in_days: number | null;
+  range_position: number | null; volume_vs_avg: number | null;
+}
+
+export interface InsightBoard {
+  generated_at: string;
+  best_buys: ScoredIdea[]; watch: ScoredIdea[]; earnings_soon: ScoredIdea[];
+  universe_size: number; notes: string[];
+}
+
+export interface VerdictLogEntry {
+  id: string; ticker: string; verdict: string; confidence: string;
+  price_at_call: number | null; entry_zone: string | null; exit_target: string | null;
+  stop_loss: string | null; hold_horizon: string | null;
+  grounded_levels: number; unsupported_levels: number; model: string; created_at: string;
 }
