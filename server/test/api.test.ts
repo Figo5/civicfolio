@@ -137,7 +137,9 @@ test('research endpoint: invalid ticker 400, unknown ticker 404, config not leak
   const unknown = await postJson('/api/research/ZZZZZ');
   assert.ok([404, 502].includes(unknown.status), `unknown ticker → 404 or transport error (got ${unknown.status})`);
   if (unknown.status === 404) {
-    assert.match(unknown.body.error, /no stored disclosure data/i);
+    // Research is no longer gated on the local filing store — any listed
+    // ticker is researchable, so the 404 is now about market data.
+    assert.match(unknown.body.error, /no market data/i);
   }
 
   // Config is server-side only: the response never echoes model/key material.
@@ -813,4 +815,75 @@ test('chat history can be cleared without wiping the store', async () => {
   const again = await agent().delete('/api/chat');
   assert.equal(again.status, 200);
   assert.equal(again.body.removed, 0);
+});
+
+test('repairJson closes brackets small models leave unbalanced', async () => {
+  const { repairJson } = await import('../src/ollamaAgent.js');
+  const ok = (s: string) => JSON.parse(repairJson(s));
+
+  // The exact failure observed from gemma4:e2b: array closed with '}'.
+  const real = '{"verdict":"buy","risks":["Dependence on AI demand; earnings risk."}';
+  assert.equal(ok(real).verdict, 'buy');
+  assert.deepEqual(ok(real).risks, ['Dependence on AI demand; earnings risk.']);
+
+  // Plain truncation.
+  assert.deepEqual(ok('{"a":[1,2'), { a: [1, 2] });
+  assert.deepEqual(ok('{"a":{"b":1'), { a: { b: 1 } });
+  // Unterminated string.
+  assert.equal(ok('{"a":"unfinished').a, 'unfinished');
+  // Braces inside strings must not be counted as structure.
+  assert.equal(ok('{"a":"a } b ] c"').a, 'a } b ] c');
+  // Escaped quotes must not flip string state.
+  assert.equal(ok('{"a":"say \\"hi\\""').a, 'say "hi"');
+  // Already-valid JSON is returned untouched.
+  assert.equal(repairJson('{"a":1}'), '{"a":1}');
+});
+
+test('extractFirstObject ignores text appended after the JSON', async () => {
+  const { extractFirstObject } = await import('../src/ollamaAgent.js');
+
+  // The observed failure: a disclaimer trailing the object was being absorbed
+  // into the final field because extraction ran to the LAST brace.
+  const withTrailer = '{"a":1,"hold":"until earnings"}{\\text{Disclaimer: not advice}}';
+  assert.equal(extractFirstObject(withTrailer), '{"a":1,"hold":"until earnings"}');
+  assert.equal(JSON.parse(extractFirstObject(withTrailer)).hold, 'until earnings');
+
+  // Nested objects still come back whole.
+  assert.equal(extractFirstObject('{"a":{"b":[1,2]}} trailing'), '{"a":{"b":[1,2]}}');
+  // Braces inside strings are not structure.
+  assert.equal(extractFirstObject('{"a":"} not the end"} after'), '{"a":"} not the end"}');
+  // Unbalanced input is handed on untouched for repairJson to close.
+  assert.equal(extractFirstObject('{"a":[1'), '{"a":[1');
+});
+
+test('verifyLevels catches levels the data does not support', async () => {
+  const { verifyLevels } = await import('../src/ollamaAgent.js');
+  // Real anchors observed for AMD.
+  const anchors = { current_price: 508.38, sma20: 477.14, sma50: 499.01, six_month_high: 580.91, six_month_low: 193.39 };
+
+  const checks = verifyLevels({
+    entry_zone: '500.00 with its 50-day SMA',        // ≈ sma50 499.01 → grounded
+    exit_target: '550.00 with its 6-month high',     // high is 580.91 → NOT grounded
+    stop_loss: '480.00 near the previous close',     // ≈ sma20 477.14 → grounded, but
+  }, anchors);
+  const by = Object.fromEntries(checks.map((c) => [c.field, c]));
+
+  assert.equal(by.entry_zone.grounded, true);
+  assert.equal(by.entry_zone.nearest_anchor, 'sma50');
+
+  // The invented target is the one that matters: it must not pass.
+  assert.equal(by.exit_target.grounded, false, '550 is not the 6-month high of 580.91');
+  assert.ok((by.exit_target.drift_pct ?? 0) > 1.5);
+
+  // Correct number, wrong label — still grounded, and the real anchor is named.
+  assert.equal(by.stop_loss.grounded, true);
+  assert.equal(by.stop_loss.nearest_anchor, 'sma20');
+
+  // A date must not be mistaken for a price.
+  const dated = verifyLevels({ hold_horizon: 'Until earnings on 2026-11-03' }, anchors);
+  assert.equal(dated[0].value, null);
+  assert.equal(dated[0].grounded, true);
+
+  // Nulls are skipped entirely.
+  assert.equal(verifyLevels({ entry_zone: null }, anchors).length, 0);
 });

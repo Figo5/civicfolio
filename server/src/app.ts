@@ -7,9 +7,10 @@ import { submitTrade, setMark, addIdea, addWatchlistItem, removeIdea, removeWatc
 import { runImport, dedupeRecords } from './importAdapter.js';
 import { getLlmConfig, callLlm, buildStoreContext } from './llm.js';
 import { getQuotes } from './quotes.js';
+import { getMovers, getPriceHistory, getTickerNews, type MoverKind } from './market.js';
 import { getFundamentals } from './fundamentals.js';
 import { buildProposals, buildTrends } from './proposals.js';
-import { runResearchAgent, getAgentConfig } from './ollamaAgent.js';
+import { runResearchAgent, getAgentConfig, verifyLevels } from './ollamaAgent.js';
 import { cleanText } from './validate.js';
 import type { AppData, ChatMessage } from './types.js';
 
@@ -176,7 +177,7 @@ export function createApp(): express.Express {
   app.post('/api/research/:ticker', async (req, res) => {
     const cfg = getAgentConfig();
     if (!cfg.enabled) {
-      return fail(res, 400, 'Research agent is disabled: set OLLAMA_API_KEY in server env to enable it.');
+      return fail(res, 400, 'Research agent is disabled: start the Ollama daemon or set OLLAMA_API_KEY.');
     }
     const ticker = String(req.params.ticker ?? '').trim().toUpperCase();
     if (!/^[A-Z]{1,10}$/.test(ticker)) return fail(res, 400, 'invalid ticker');
@@ -186,29 +187,124 @@ export function createApp(): express.Express {
       return res.json({ verdict: cached.verdict, cached: true });
     }
 
-    const proposals = await buildProposals(data());
-    const proposal = proposals.proposals.find((p) => p.ticker === ticker);
-    if (!proposal) return fail(res, 404, `no stored disclosure data for ${ticker} — nothing to research`);
+    // Any listed ticker can be researched now — the market is the universe,
+    // not whatever happens to sit in the local filing store.
+    const [quotes, history, newsBundle, fund] = await Promise.all([
+      getQuotes([ticker]),
+      getPriceHistory(ticker),
+      getTickerNews(ticker, 6),
+      getFundamentals(ticker),
+    ]);
+    const quote = quotes.quotes[0] ?? null;
+    if (!quote && !history) return fail(res, 404, `no market data for ${ticker} — check the ticker`);
 
-    const fund = await getFundamentals(ticker);
+    const movers = await getMovers('most_actives', 50).catch(() => []);
+    const mover = movers.find((m) => m.ticker === ticker) ?? null;
+
+    const pct = (n: number | null | undefined) => (typeof n === 'number' ? `${n > 0 ? '+' : ''}${n.toFixed(2)}%` : 'n/a');
+    const marketSummary = [
+      quote ? `Price ${quote.price} ${quote.currency} on ${quote.exchange ?? 'exchange'} (as of ${quote.as_of}).` : 'No live quote.',
+      quote?.previous_close ? `Previous close ${quote.previous_close}.` : '',
+      mover ? `Today ${pct(mover.change_pct)}; volume ${mover.volume_vs_avg ?? 'n/a'}x its 3-month average.` : '',
+      mover ? `52-week range ${mover.fifty_two_week_low}–${mover.fifty_two_week_high}; price sits at ${mover.range_position !== null ? Math.round(mover.range_position * 100) + '%' : 'n/a'} of that range.` : '',
+      mover ? `Vs 50-day average ${pct(mover.fifty_day_change_pct ? mover.fifty_day_change_pct * 100 : null)}, vs 200-day ${pct(mover.two_hundred_day_change_pct ? mover.two_hundred_day_change_pct * 100 : null)}.` : '',
+      mover?.next_earnings ? `Next earnings ${mover.next_earnings.slice(0, 10)}${mover.earnings_is_estimate ? ' (estimated date)' : ' (confirmed)'}.` : '',
+      mover?.forward_pe ? `Forward P/E ${mover.forward_pe.toFixed(1)}.` : '',
+      newsBundle.sector ? `Sector ${newsBundle.sector} / ${newsBundle.industry ?? 'n/a'}.` : '',
+    ].filter(Boolean).join('\n');
+
+    const levelsSummary = history
+      ? [
+          `Last close ${history.last_close}.`,
+          `6-month range ${history.recent_low}–${history.recent_high}.`,
+          `20-day SMA ${history.sma20 ?? 'n/a'}, 50-day SMA ${history.sma50 ?? 'n/a'}.`,
+          `${history.pct_from_recent_high}% from the 6-month high, ${history.pct_from_recent_low}% above the 6-month low.`,
+        ].join('\n')
+      : 'No price history available.';
+
+    const newsSummary = newsBundle.news.length > 0
+      ? newsBundle.news.map((n) => `- [${n.published?.slice(0, 10) ?? 'undated'}] ${n.publisher ?? 'source'}: ${n.title}`).join('\n')
+      : 'No recent headlines retrieved.';
+
     const fundSummary = 'cik' in fund
-      ? `Revenue ${fund.revenue_usd ?? 'n/a'}, net income ${fund.net_income_usd ?? 'n/a'}, assets ${fund.assets_usd ?? 'n/a'}, equity ${fund.equity_usd ?? 'n/a'}, diluted EPS ${fund.diluted_eps ?? 'n/a'} — ${fund.source_form ?? 'filing'} filed ${fund.source_filed ?? 'unknown'} (${fund.company_name}).`
+      ? `Revenue ${fund.revenue_usd ?? 'n/a'}, net income ${fund.net_income_usd ?? 'n/a'}, assets ${fund.assets_usd ?? 'n/a'}, equity ${fund.equity_usd ?? 'n/a'}, diluted EPS ${fund.diluted_eps ?? 'n/a'} — ${fund.source_form ?? 'filing'} filed ${fund.source_filed ?? 'unknown'}.`
       : `Unavailable: ${fund.reason}`;
-
-    const disclosureLines = proposals.proposals.length > 0
-      ? `Records for ${ticker}: ${proposal.buys} purchase(s), ${proposal.sells} sale(s); ${proposal.buy_owners.length} distinct buyer(s): ${proposal.buy_owners.join(', ')}; aggregate filed range ${proposal.total_range_label}; latest filing published ${proposal.latest_published}.`
-      : 'none';
 
     const result = await runResearchAgent({
       ticker,
-      company: proposal.company,
-      score: proposal.score,
-      disclosure_summary: disclosureLines,
+      company: mover?.name ?? quote?.ticker ?? ticker,
+      market_summary: marketSummary,
+      levels_summary: levelsSummary,
+      news_summary: newsSummary,
       fundamentals_summary: fundSummary,
     });
     if (!result.ok) return fail(res, 502, result.error);
-    researchCache.set(ticker, { at: Date.now(), verdict: result.verdict });
-    res.json({ verdict: result.verdict, cached: false });
+
+    // Re-derive every stated level from the data we supplied. A model that
+    // names an anchor and then quotes a different number must not have that
+    // presented to the user as verified.
+    const v = result.verdict;
+    v.level_checks = verifyLevels(
+      { entry_zone: v.entry_zone, exit_target: v.exit_target, stop_loss: v.stop_loss },
+      {
+        current_price: quote?.price ?? null,
+        sma20: history?.sma20 ?? null,
+        sma50: history?.sma50 ?? null,
+        six_month_high: history?.recent_high ?? null,
+        six_month_low: history?.recent_low ?? null,
+        fifty_two_week_high: mover?.fifty_two_week_high ?? null,
+        fifty_two_week_low: mover?.fifty_two_week_low ?? null,
+      },
+    );
+    researchCache.set(ticker, { at: Date.now(), verdict: v });
+    res.json({ verdict: v, cached: false });
+  });
+
+  // ---- live market ----
+  // What is actually moving right now, from exchange data rather than filings.
+  app.get('/api/market/movers', async (req, res) => {
+    const raw = typeof req.query.kind === 'string' ? req.query.kind : 'most_actives';
+    const kinds: MoverKind[] = ['most_actives', 'day_gainers', 'day_losers'];
+    if (!kinds.includes(raw as MoverKind)) {
+      return fail(res, 400, `kind must be one of: ${kinds.join(', ')}`);
+    }
+    const count = Number(req.query.count ?? 15);
+    const movers = await getMovers(raw as MoverKind, Number.isFinite(count) ? count : 15);
+    res.json({
+      kind: raw,
+      count: movers.length,
+      movers,
+      fetched_at: new Date().toISOString(),
+      note: 'Exchange data via a public endpoint. Each row reports its own delay; nothing here is predicted.',
+    });
+  });
+
+  // Everything known about one ticker, assembled for analysis.
+  app.get('/api/market/ticker/:symbol', async (req, res) => {
+    const symbol = String(req.params.symbol ?? '').trim().toUpperCase();
+    if (!/^[A-Z]{1,10}$/.test(symbol)) return fail(res, 400, 'invalid ticker');
+
+    const [quotes, history, newsBundle, fundamentals] = await Promise.all([
+      getQuotes([symbol]),
+      getPriceHistory(symbol),
+      getTickerNews(symbol, 6),
+      getFundamentals(symbol),
+    ]);
+    const quote = quotes.quotes[0] ?? null;
+    if (!quote && !history) {
+      return fail(res, 404, `no market data for ${symbol} — check the ticker`);
+    }
+    res.json({
+      ticker: symbol,
+      quote,
+      history,
+      news: newsBundle.news,
+      sector: newsBundle.sector,
+      industry: newsBundle.industry,
+      fundamentals: 'cik' in fundamentals ? fundamentals : null,
+      fundamentals_unavailable: 'cik' in fundamentals ? null : fundamentals.reason,
+      fetched_at: new Date().toISOString(),
+    });
   });
 
   // ---- chat ----
