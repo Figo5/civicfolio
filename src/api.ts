@@ -161,6 +161,7 @@ export const api = {
     return get<{ data_mode_present: string[]; count: number; records: DisclosureRecord[] }>(`/api/disclosures${qs ? '?' + qs : ''}`);
   },
   chat: () => get<{ mode_available: boolean; messages: ChatMessage[] }>('/api/chat'),
+  clearChat: () => del<{ ok: boolean; removed: number }>('/api/chat'),
   fundamentals: (ticker: string) =>
     get<{ fundamentals: Fundamentals }>(`/api/fundamentals?ticker=${encodeURIComponent(ticker)}`),
   proposals: () => get<ProposalsResponse>('/api/proposals'),

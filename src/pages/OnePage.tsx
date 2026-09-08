@@ -221,9 +221,22 @@ function Chat() {
   };
 
   return (
-    <div className="card">
+    <div className="card" id="ask">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <p className="card-title" style={{ margin: 0 }}>Ask about the data</p>
+        {messages.length > 0 && (
+          <button
+            className="btn small"
+            type="button"
+            style={{ marginLeft: 'auto', marginRight: 8 }}
+            onClick={async () => {
+              await api.clearChat().catch(() => {});
+              setMessages([]);
+            }}
+          >
+            Clear history
+          </button>
+        )}
         <select value={mode} onChange={(e) => setMode(e.target.value as 'deterministic' | 'llm')} style={{ width: 'auto' }}>
           <option value="deterministic">Local engine (no key)</option>
           {modeAvailable && <option value="llm">LLM (configured)</option>}
@@ -267,15 +280,43 @@ function Chat() {
 
 export function OnePage() {
   const [data, setData] = useState<ProposalsResponse | null>(null);
+  const [filter, setFilter] = useState('');
+  const [showAll, setShowAll] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [trends, setTrends] = useState<Trends | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    api.proposals().then(setData).catch((e) => setError(String((e as Error).message ?? e)));
+    api.proposals().then(setData)
+      .catch((e) => setError(String((e as Error).message ?? e)))
+      .finally(() => {
+        setLoading(false);
+        // Honour a deep link (#ask, #trends) once the sections it points at
+        // actually exist. On first paint they have not rendered yet, so the
+        // browser's own jump finds nothing and silently leaves you at the top.
+        const id = location.hash.slice(1);
+        if (id) {
+          requestAnimationFrame(() => {
+            document.getElementById(id)?.scrollIntoView({ block: 'start' });
+          });
+        }
+      });
     api.trends().then(setTrends).catch(() => {});
   }, []);
 
-  const proposals = data?.proposals ?? [];
+  const allProposals = data?.proposals ?? [];
+  const q = filter.trim().toLowerCase();
+  const matched = q
+    ? allProposals.filter((p) =>
+        p.ticker.toLowerCase().includes(q) ||
+        p.company.toLowerCase().includes(q) ||
+        p.buy_owners.some((o) => o.toLowerCase().includes(q)) ||
+        p.sell_owners.some((o) => o.toLowerCase().includes(q)))
+    : allProposals;
+  // 32 rows is a scroll wall; show the ranked head and let the user open the rest.
+  const COLLAPSED = 10;
+  const proposals = showAll || q ? matched : matched.slice(0, COLLAPSED);
+  const hidden = matched.length - proposals.length;
 
   return (
     <div>
@@ -288,11 +329,27 @@ export function OnePage() {
 
       {error && <div className="error-text">{error}</div>}
 
-      <div className="card">
-        <p className="card-title">Proposals <span className="badge imported">last {data?.window_days ?? 180} days of filings</span></p>
-        {proposals.length === 0 ? (
+      <div className="card" id="proposals">
+        <div className="section-head">
+          <p className="card-title" style={{ margin: 0 }}>
+            Proposals <span className="badge imported">last {data?.window_days ?? 180} days of filings</span>
+          </p>
+          <input
+            className="filter-input"
+            type="search"
+            placeholder="Filter ticker, company or filer…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            aria-label="Filter proposals"
+          />
+        </div>
+        {loading ? (
+          <div className="empty-state">Loading proposals…</div>
+        ) : proposals.length === 0 ? (
           <div className="empty-state">
-            No proposals yet — waiting for the next daily disclosure refresh, or import filings on the Disclosures page.
+            {q
+              ? `Nothing matches “${filter.trim()}”.`
+              : 'No proposals yet — waiting for the next daily disclosure refresh, or import filings on the Disclosures page.'}
           </div>
         ) : (
           <table className="table">
@@ -307,6 +364,16 @@ export function OnePage() {
             </tbody>
           </table>
         )}
+        {hidden > 0 && (
+          <button className="btn small" type="button" onClick={() => setShowAll(true)} style={{ marginTop: 10 }}>
+            Show {hidden} more ({matched.length} total)
+          </button>
+        )}
+        {showAll && !q && matched.length > COLLAPSED && (
+          <button className="btn small" type="button" onClick={() => setShowAll(false)} style={{ marginTop: 10 }}>
+            Show top {COLLAPSED} only
+          </button>
+        )}
         <p className="provenance">
           *Price is a delayed, unofficial quote from a public endpoint — indicative only, never a trading feed.
           {' '}{data?.notes.slice(0, 2).join(' ')}
@@ -314,7 +381,7 @@ export function OnePage() {
       </div>
 
       {trends && (
-        <div className="grid-2">
+        <div className="grid-2" id="trends">
           <div className="card">
             <p className="card-title">Most bought</p>
             {trends.most_bought.length === 0 ? <div className="empty-state">No data</div> : (

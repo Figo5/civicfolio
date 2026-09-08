@@ -796,3 +796,21 @@ test('model failover: ranks candidates and recognises unavailable models', async
     assert.equal(isModelUnavailable(e), false, e);
   }
 });
+
+test('chat history can be cleared without wiping the store', async () => {
+  await postJson('/api/demo/load');
+  await postJson('/api/chat', { question: 'what data do you have?' });
+  assert.ok(load().chat.length > 0, 'a question and answer were recorded');
+  const disclosuresBefore = load().disclosures.length;
+
+  const cleared = await agent().delete('/api/chat');
+  assert.equal(cleared.status, 200);
+  assert.ok(cleared.body.removed > 0);
+  assert.equal(load().chat.length, 0, 'history is gone');
+  assert.equal(load().disclosures.length, disclosuresBefore, 'the store itself is untouched');
+
+  // Clearing an already-empty history is a no-op, not an error.
+  const again = await agent().delete('/api/chat');
+  assert.equal(again.status, 200);
+  assert.equal(again.body.removed, 0);
+});

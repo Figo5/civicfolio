@@ -281,6 +281,18 @@ export function createApp(): express.Express {
     res.json({ message: msg });
   });
 
+  // Chat history is append-only and survives data reimports, so old answers
+  // ("no data about MSFT") linger after the store has changed and read as
+  // current. Let it be cleared without wiping the whole store.
+  app.delete('/api/chat', (_req, res) => {
+    const removed = update((draft) => {
+      const n = draft.chat.length;
+      draft.chat = [];
+      return { committed: n > 0, value: n };
+    });
+    res.json({ ok: true, removed });
+  });
+
   // ---- watchlist / ideas ----
   app.get('/api/ideas', (_req, res) => {
     res.json({ ideas: data().ideas });
