@@ -55,6 +55,25 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
     }
   };
 
+  const [quoteMsg, setQuoteMsg] = useState<string | null>(null);
+  const [quoteBusy, setQuoteBusy] = useState(false);
+
+  const refreshQuotes = async () => {
+    setQuoteBusy(true); setMarkError(null); setQuoteMsg(null);
+    try {
+      const res = await api.refreshQuotes();
+      setPortfolio(res.portfolio);
+      const failed = res.failed.length
+        ? ` ${res.failed.length} without a quote: ${res.failed.map((f) => f.ticker).join(', ')}.`
+        : '';
+      setQuoteMsg(`Valued ${res.updated} position(s) from live quotes.${failed}`);
+    } catch (e) {
+      setMarkError(String((e as Error).message ?? e));
+    } finally {
+      setQuoteBusy(false);
+    }
+  };
+
   const saveMark = async (ticker: string, raw: string, previous: number | null) => {
     const trimmed = raw.trim();
     const parsed = trimmed === '' ? null : Number(trimmed);
@@ -163,7 +182,13 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
       </div>
 
       <div className="card">
-        <p className="card-title">Open positions</p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <p className="card-title">Open positions</p>
+          <button className="btn small" type="button" onClick={refreshQuotes} disabled={quoteBusy || !portfolio?.positions.length}>
+            {quoteBusy ? 'Fetching quotes…' : 'Value from live quotes'}
+          </button>
+        </div>
+        {quoteMsg && <p className="provenance" style={{ marginTop: 0 }}>{quoteMsg}</p>}
         {!portfolio || portfolio.positions.length === 0 ? (
           <div className="empty-state">No open positions.</div>
         ) : (
@@ -191,7 +216,14 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
                       onBlur={(e) => saveMark(p.ticker, e.target.value, p.mark_price)}
                     />
                   </td>
-                  <td className="num">{p.market_value_usd === null ? <span className="muted">no mark</span> : fmtUsd(p.market_value_usd)}</td>
+                  <td className="num">
+                    {p.market_value_usd === null ? <span className="muted">no mark</span> : fmtUsd(p.market_value_usd)}
+                    {p.mark_source && (
+                      <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginTop: 1 }}>
+                        {p.mark_source === 'quote' ? `quote · ${p.quote_source ?? 'market'}` : 'you entered'}
+                      </div>
+                    )}
+                  </td>
                   <td className={`num ${p.unrealized_pl_usd === null ? '' : p.unrealized_pl_usd >= 0 ? 'pl-up' : 'pl-down'}`}>
                     {p.unrealized_pl_usd === null
                       ? <span className="muted">—</span>
@@ -202,8 +234,9 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
             </tbody>
           </table>
           <p className="provenance">
-            <strong>Your mark</strong> is a price you type in yourself — this app has no market data feed and never fetches quotes.
-            Unrealized figures are derived from your marks, so they are only as current as the last value you entered.
+            <strong>Your mark</strong> is either a price you typed in or one pulled from live quotes — each row says which.
+            Quotes are delayed and come from a public, unofficial endpoint, so treat them as indicative, not as a trading feed.
+            Paper trade prices are always the value you entered and are never overwritten by a quote.
             {portfolio.marked_positions_count > 0 && portfolio.marked_positions_count < portfolio.positions.length
               && ' Unmarked positions are counted at cost basis in the account total.'}
           </p>

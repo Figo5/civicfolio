@@ -8,6 +8,7 @@ export function ChatPage() {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [includePortfolio, setIncludePortfolio] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -27,7 +28,7 @@ export function ChatPage() {
     setMessages((m) => [...m, userMsg]);
     setInput('');
     try {
-      const res = await api.ask(question, mode);
+      const res = await api.ask(question, mode, mode === 'llm' && includePortfolio);
       setMessages((m) => [...m, res.message]);
     } catch (e) {
       setError(String((e as Error).message ?? e));
@@ -56,6 +57,12 @@ export function ChatPage() {
             <option value="deterministic">Deterministic (local engine — rule-based, not an LLM)</option>
             {modeAvailable && <option value="llm">LLM (configured endpoint)</option>}
           </select>
+          {mode === 'llm' && (
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: 12, fontSize: 12.5, color: 'var(--text-dim)' }}>
+              <input type="checkbox" checked={includePortfolio} onChange={(e) => setIncludePortfolio(e.target.checked)} style={{ width: 'auto' }} />
+              Include my paper portfolio — sends your positions to the configured endpoint
+            </label>
+          )}
         </div>
 
         <div className="chat-scroll" ref={scrollRef}>

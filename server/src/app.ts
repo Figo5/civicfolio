@@ -6,6 +6,7 @@ import { answerQuestion } from './research.js';
 import { submitTrade, setMark, addIdea, addWatchlistItem, removeIdea, removeWatchlistItem, portfolioSummary } from './portfolio.js';
 import { runImport, dedupeRecords } from './importAdapter.js';
 import { getLlmConfig, callLlm, buildStoreContext } from './llm.js';
+import { getQuotes } from './quotes.js';
 import { cleanText } from './validate.js';
 import type { AppData, ChatMessage } from './types.js';
 
@@ -163,7 +164,18 @@ export function createApp(): express.Express {
         return fail(res, 400, 'LLM mode not configured on the server. Deterministic mode works without any API key.');
       }
       // Minimal lower-trust projection: disclosures only, no user content.
-      const ctx = buildStoreContext({ disclosures: d.disclosures });
+      // Portfolio goes to the external endpoint only when the user asks for it.
+      const includePortfolio = body.include_portfolio === true;
+      const summary = includePortfolio ? portfolioSummary(d) : undefined;
+      const ctx = buildStoreContext({ disclosures: d.disclosures }, summary && {
+        cash_usd: summary.cash_usd,
+        positions: summary.positions.map((p) => ({
+          ticker: p.ticker, quantity: p.quantity, cost_basis_usd: p.cost_basis_usd, avg_cost: p.avg_cost,
+          mark_price: p.mark_price, mark_source: p.mark_source, market_value_usd: p.market_value_usd,
+          unrealized_pl_usd: p.unrealized_pl_usd, unrealized_pl_pct: p.unrealized_pl_pct,
+        })),
+        unrealized_pl_usd: summary.unrealized_pl_usd,
+      });
       const llmRes = await callLlm(cfg, question, ctx);
       if (!llmRes.ok) return fail(res, 502, llmRes.error ?? 'LLM request failed');
       const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString() };
@@ -255,6 +267,39 @@ export function createApp(): express.Express {
     if (!result.ok) return fail(res, 400, result.error ?? 'invalid trade');
     res.json({ trade: result.trade, portfolio: portfolioSummary(load()), duplicate: result.duplicate === true });
   });
+  // Live quotes. Delayed, unofficial, best-effort: unresolvable symbols come
+  // back under `failed` rather than as a fabricated price.
+  app.get('/api/quotes', async (req, res) => {
+    const raw = typeof req.query.tickers === 'string' ? req.query.tickers : '';
+    const tickers = raw.split(',').map((t) => t.trim()).filter(Boolean);
+    if (tickers.length === 0) return fail(res, 400, 'tickers query parameter is required (comma separated)');
+    const { quotes, failed } = await getQuotes(tickers);
+    res.json({
+      quotes,
+      failed,
+      fetched_at: new Date().toISOString(),
+      disclaimer: 'Delayed, unofficial market data from a public endpoint. Not a real-time trading feed.',
+    });
+  });
+
+  // Value every open position from live quotes in one call, tagging each mark
+  // as quote-sourced so it is never mistaken for a price you entered.
+  app.post('/api/portfolio/marks/refresh', async (_req, res) => {
+    const tickers = Object.keys(load().portfolio.positions);
+    if (tickers.length === 0) return res.json({ updated: 0, failed: [], portfolio: portfolioSummary(load()) });
+
+    const { quotes, failed } = await getQuotes(tickers);
+    const out = update((draft) => {
+      let updated = 0;
+      for (const q of quotes) {
+        const r = setMark(draft, { ticker: q.ticker, price: q.price, source: 'quote', quote_source: q.source });
+        if (r.ok) updated += 1;
+      }
+      return { committed: updated > 0, value: updated };
+    });
+    res.json({ updated: out, failed, portfolio: portfolioSummary(load()) });
+  });
+
   // Mark prices: user-entered valuations for held positions. Not market data.
   app.post('/api/portfolio/marks', (req, res) => {
     const out = update<{ status: number; body: unknown }>((draft) => {

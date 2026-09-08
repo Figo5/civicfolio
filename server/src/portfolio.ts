@@ -199,7 +199,13 @@ export function setMark(data: AppData, input: unknown): { ok: boolean; error?: s
   if ((price as number) > MAX_PRICE_USD) {
     return { ok: false, error: `mark price exceeds practical limit (${MAX_PRICE_USD})` };
   }
-  data.portfolio.marks[ticker] = { price: price as number, marked_at: new Date().toISOString() };
+  const isQuote = body.source === 'quote';
+  data.portfolio.marks[ticker] = {
+    price: price as number,
+    marked_at: new Date().toISOString(),
+    source: isQuote ? 'quote' : 'user',
+    ...(isQuote && typeof body.quote_source === 'string' ? { quote_source: body.quote_source.slice(0, 40) } : {}),
+  };
   return { ok: true, portfolio: data.portfolio };
 }
 
@@ -218,6 +224,8 @@ export function portfolioSummary(data: AppData) {
       avg_cost: avgCost,
       mark_price: mark ? mark.price : null,
       marked_at: mark ? mark.marked_at : null,
+      mark_source: mark ? (mark.source ?? 'user') : null,
+      quote_source: mark?.quote_source ?? null,
       market_value_usd: marketValue,
       unrealized_pl_usd: marketValue === null ? null : round2(marketValue - p.cost_basis_usd),
       unrealized_pl_pct: marketValue === null || p.cost_basis_usd === 0

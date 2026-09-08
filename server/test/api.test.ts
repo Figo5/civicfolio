@@ -585,3 +585,37 @@ test('destructive resets back up the previous store first', async () => {
   assert.equal(restored.disclosures.length, 12, 'backup holds the pre-clear data, not the cleared store');
   assert.equal(load().disclosures.length, 0, 'the live store really is cleared');
 });
+
+test('quotes: marks tagged by source, unresolvable symbols reported not invented', async () => {
+  const { clearQuoteCacheForTests } = await import('../src/quotes.js');
+  clearQuoteCacheForTests();
+
+  // A mark you type is tagged 'user'.
+  await postJson('/api/demo/clear');
+  await postJson('/api/portfolio/trades', {
+    ticker: 'AAPL', side: 'BUY', quantity: 2, price: 100, price_source: 'user_entered',
+    trade_date: '2026-09-01', client_request_id: 'quote-test-1',
+  });
+  const typed = await postJson('/api/portfolio/marks', { ticker: 'AAPL', price: 150 });
+  assert.equal(typed.body.portfolio.positions[0].mark_source, 'user');
+  assert.equal(typed.body.portfolio.positions[0].quote_source, null);
+
+  // A quote-sourced mark is tagged 'quote' and keeps its origin.
+  const quoted = await postJson('/api/portfolio/marks', {
+    ticker: 'AAPL', price: 175, source: 'quote', quote_source: 'yahoo',
+  });
+  assert.equal(quoted.body.portfolio.positions[0].mark_source, 'quote');
+  assert.equal(quoted.body.portfolio.positions[0].quote_source, 'yahoo');
+  assert.equal(quoted.body.portfolio.positions[0].market_value_usd, 350);
+
+  // The endpoint requires tickers and rejects an empty request.
+  const bad = await agent().get('/api/quotes');
+  assert.equal(bad.status, 400);
+
+  // Garbage symbols must never come back as a price.
+  const junk = await agent().get('/api/quotes?tickers=' + encodeURIComponent('!!!,toolongtickername'));
+  assert.equal(junk.status, 200);
+  assert.equal(junk.body.quotes.length, 0, 'no prices invented for junk symbols');
+  assert.equal(junk.body.failed.length, 2, 'every rejected symbol is explained');
+  assert.match(junk.body.failed[0].reason, /not a valid ticker/);
+});

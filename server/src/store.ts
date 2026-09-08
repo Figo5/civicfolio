@@ -87,7 +87,12 @@ function sanitizePortfolio(p: unknown): PortfolioState {
       if (!v || typeof v !== 'object') continue;
       const mv = v as Record<string, unknown>;
       if (isFiniteNumber(mv.price) && (mv.price as number) > 0 && typeof mv.marked_at === 'string') {
-        marks[String(ticker).toUpperCase().slice(0, 12)] = { price: mv.price as number, marked_at: mv.marked_at };
+        marks[String(ticker).toUpperCase().slice(0, 12)] = {
+          price: mv.price as number,
+          marked_at: mv.marked_at,
+          source: mv.source === 'quote' ? 'quote' : 'user',
+          ...(typeof mv.quote_source === 'string' ? { quote_source: mv.quote_source } : {}),
+        };
       }
     }
   }

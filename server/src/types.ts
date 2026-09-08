@@ -56,8 +56,12 @@ export interface PaperTrade {
 // A price YOU typed in for a position you hold, so the app can show unrealized
 // gain/loss. Never a quote: no market data source exists in this app.
 export interface MarkPrice {
-  price: number; // finite, > 0, user-entered
-  marked_at: string; // ISO datetime the value was entered
+  price: number; // finite, > 0
+  marked_at: string; // ISO datetime the value was recorded
+  // 'user' = you typed it. 'quote' = pulled from a market data source, which
+  // is delayed and unofficial. Kept distinct so the UI never conflates them.
+  source?: 'user' | 'quote';
+  quote_source?: string; // e.g. "yahoo"; only set when source === 'quote'
 }
 
 export interface PortfolioState {
