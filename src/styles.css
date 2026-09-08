@@ -358,7 +358,7 @@ html { scroll-behavior: smooth; }
 }
 .thread:hover { color: var(--text); }
 .thread.active { background: rgba(79,143,247,0.16); color: var(--blue); border-color: rgba(79,143,247,0.4); }
-.chat-panel .chat-log { flex: 1; overflow-y: auto; padding-right: 4px; }
+.chat-panel .chat-log { flex: 1 1 0; min-height: 0; overflow-y: auto; padding-right: 4px; }
 .chat-controls { display: flex; gap: 8px; align-items: center; }
 .chat-controls select { flex: 1; font-size: 12px; }
 

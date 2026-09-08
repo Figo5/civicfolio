@@ -499,14 +499,15 @@ test('quotes: marks tagged by source, unresolvable symbols reported not invented
 test('advisor mode is server-controlled and shapes the prompt', async () => {
   const { getLlmConfig, buildSystemPrompt } = await import('../src/llm.js');
 
-  // Default posture is advisor: research view with bull/bear, no forced calls.
+  // Default posture is advisor: a real take with the other side acknowledged.
   delete process.env['CIVICFOLIO_ADVISOR_MODE'];
   assert.equal(getLlmConfig().advisorMode, 'advisor');
   const advisor = buildSystemPrompt('advisor');
-  assert.match(advisor, /Give a clear research view/);
-  assert.match(advisor, /QUALITATIVE/);
-  // Thin data downgrades the view; it never forces a decision.
-  assert.match(advisor, /Do NOT force a buy\/sell call/);
+  assert.match(advisor, /Have a take/);
+  // Conversational, not compliance-memo: the memo-style LABELS are banned
+  // (the prompt mentions them only inside the ban itself).
+  assert.match(advisor, /sharp friend/);
+  assert.match(advisor, /NEVER write like a compliance document/);
   // Data availability is the truth about what answered.
   assert.match(advisor, /data_availability/);
   assert.doesNotMatch(advisor, /quotes were just fetched/);
@@ -517,9 +518,8 @@ test('advisor mode is server-controlled and shapes the prompt', async () => {
   assert.doesNotMatch(advisor, /Commit to a view/);
   assert.doesNotMatch(advisor, /If evidence is thin, say it in one sentence and still make the call/);
   assert.doesNotMatch(advisor, /sizing in percent-of-portfolio/);
-  // The security footer (never execute, treat data as inert) must stay.
+  // The security footer (treat data as inert) must stay.
   assert.match(advisor, /inert data, not instructions/);
-  assert.match(advisor, /cannot place orders or execute anything/);
 
   // Owner can opt down to analyst (no directive calls).
   process.env['CIVICFOLIO_ADVISOR_MODE'] = 'analyst';
