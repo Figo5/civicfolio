@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment / secrets (never commit)
+.env
+.env.local
+.env.*.local
+
+# Local app data lives OUTSIDE the repo by default (~/.civicfolio).
+# If you ever point CIVICFOLIO_DATA_DIR into the repo, keep it ignored:
+data-local/
+*.civicfolio-data.json
+
+# OS noise
+.DS_Store
+*.log
