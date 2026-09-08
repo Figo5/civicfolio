@@ -178,7 +178,12 @@ input::placeholder, textarea::placeholder { color: var(--text-faint); }
 .cite a:hover { text-decoration: underline; }
 .cite .cite-no-link { color: var(--text-faint); font-size: 11px; font-family: var(--mono); }
 .chat-input-row { display: flex; gap: 10px; margin-top: 12px; }
-.chat-input-row input { flex: 1; }
+.chat-input-row input {
+  flex: 1;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+}
+.chat-input-row input:focus { border-color: var(--green); background: rgba(34, 197, 94, 0.05); }
 
 /* ---- filters ---- */
 .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 14px; }
@@ -248,6 +253,16 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg-soft); pa
 .pl-up { color: var(--green); font-variant-numeric: tabular-nums; }
 .pl-down { color: var(--red); font-variant-numeric: tabular-nums; }
 .muted { color: var(--text-dim); }
+
+/* --- Robinhood trade panel ---------------------------------------------- */
+.trade-panel { border: 1px solid var(--border-soft); border-radius: 10px; padding: 12px 14px; background: var(--bg-soft); }
+.trade-panel .form-row { align-items: flex-end; }
+.review-box {
+  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 8px;
+  padding: 10px 12px; font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
+  max-height: 220px; overflow-y: auto; white-space: pre-wrap; margin: 0;
+}
+.badge.ok { background: var(--green-soft); color: var(--green); }
 
 /* --- Sidebar section navigation ----------------------------------------- */
 .section-nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 8px; }

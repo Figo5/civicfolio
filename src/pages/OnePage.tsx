@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea } from '../api';
+import { TradePanel } from './TradePanel';
+import { TrackRecord } from './TrackRecord';
 
 const MOVER_TABS = [
   { kind: 'most_actives' as const, label: 'Most active' },
@@ -170,6 +172,10 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
               </ul>
             </>
           )}
+
+          <div style={{ marginTop: 14, borderTop: '1px solid var(--border-soft)', paddingTop: 14 }}>
+            <TradePanel ticker={ticker} price={snap.quote?.price ?? null} earningsInDays={snap.earnings_in_days} />
+          </div>
 
           {snap.fundamentals && (
             <p className="provenance">
@@ -365,6 +371,8 @@ export function OnePage() {
       <div id="detail">
         {selected && <TickerDetail ticker={selected} onClose={() => setSelected(null)} />}
       </div>
+
+      <TrackRecord onOpen={openTicker} />
 
     </div>
   );

@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 
 const DEFAULT_LOCAL_HOST = 'http://127.0.0.1:11434';
 const CLOUD_BASE = 'https://ollama.com';
-const DEFAULT_MODEL = 'gpt-oss:120b-cloud';
+const DEFAULT_MODEL = 'deepseek-v4-flash:0731-cloud';
 const MAX_SEARCHES = 4;
 const MAX_ITERATIONS = 8;
 const TIMEOUT_MS = 120_000;

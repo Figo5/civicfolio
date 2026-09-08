@@ -193,6 +193,83 @@ typecheck/build/smoke clean, theme verified by screenshot at 1440px.
 **Verification:** 42/42 tests, typecheck/build/smoke clean, theme verified by
 screenshot, agent verified on two tickers end-to-end.
 
+## Session 8 (GLM, 2026-09-08) — Robinhood Trading MCP (real orders)
+
+- **`server/src/robinhood.ts`**: official Robinhood Trading MCP client
+  (`https://agent.robinhood.com/mcp/trading`). OAuth2 discovery verified live
+  (dynamic client registration + PKCE S256, token endpoint at
+  api.robinhood.com/oauth2/token). Tokens stored at
+  `~/.civicfolio/robinhood-tokens.json` (chmod 600, outside repo, never sent to
+  the browser — only a hash-derived session hint is).
+- **Routes**: status / connect (returns PKCE authorization URL — verified live to
+  robinhood.com/oauth) / OAuth callback on the same server / disconnect /
+  verify (initialize + tools list) / review (Robinhood's own pre-trade
+  warnings) / place (requires `confirm:true` — rejects otherwise) / positions /
+  portfolio. `place` also takes a client_request_id for idempotency.
+- **UI** (`src/pages/TradePanel.tsx`, embedded in every ticker detail): connect
+  flow → quantity/side/market-or-limit → **Robinhood's own pre-trade review
+  shown in full** → explicit "Confirm: BUY n TICKER" → order result JSON.
+  Fallback link opens the ticker on robinhood.com directly (zero-setup path).
+- **Safety posture**: no auto-trading; every real order requires the user to
+  press Confirm after reading the pre-trade check; market-order fills are
+  explicitly labeled as next-available-price.
+
+**One-time user setup:** press Connect Robinhood → authorize in browser (opens
+free Agentic account; desktop only per Robinhood docs) → press Check connection.
+Then any ticker card can place real orders with confirmation.
+
+**Verification:** 32/32 tests, typecheck/build/smoke clean, status endpoint
+honest when unconnected, place refuses without confirm:true, authorization URL
+generated with PKCE + state + redirect to 127.0.0.1:8787 callback.
+
+## Session 9 (GLM, 2026-09-08) — Robinhood review fixed, chat advisor default
+
+**Review crash fixed.** Three root causes, all from unverified assumptions about
+the MCP schema, now verified against the live API:
+- `quantity`, `limit_price` are STRINGS in Robinhood's schema; the order-type
+  param is named `type` (not `order_type`); orders require an explicit
+  `account_number` resolved from `get_accounts` (the agentic_allowed one).
+- Responses arrive as SSE (`event: message\ndata: {...}`), not bare JSON —
+  parser added.
+- get_accounts nests under `data.accounts[]`; the code picks the single
+  `agentic_allowed: true` active account (user has two accounts; the "Agentic"
+  one is used). Live-verified: review on AAPL returns the real quote ($315.48),
+  order checks, and buying-power alert.
+
+**Chat is now an LLM advisor by default.** DeepSeek v4 Flash
+(`deepseek-v4-flash:0731-cloud`) replaces gpt-oss-120b everywhere (research
+agent + chat LLM mode, which now also routes through the local Ollama daemon
+instead of requiring OPENAI_API_KEY). Advisor posture is the default;
+`CIVICFOLIO_ADVISOR_MODE=analyst` opts down. The system prompt no longer
+strangles the model with "answer ONLY from the DATA block" — it may use its
+own market knowledge when the block lacks a ticker, marking stale numbers as
+approximate. Verified: "if you had $43.84 what would you buy" → direct,
+reasoned answer (fractional index ETF) with a data-freshness note.
+
+**Verification:** 32/32 tests, typecheck/build/smoke clean; Robinhood review
+returns live quote + order checks; chat LLM advisor verified live.
+
+## Session 10 (GLM, 2026-09-08) — track record, alerts, positions, earnings guard
+
+- **Track record page** (`server/src/trackRecord.ts` + `src/pages/TrackRecord.tsx`):
+  every logged verdict is enriched with the CURRENT quote and scored — directional
+  hit/miss (±0.5% band), age, avg move since call. HOLD/UNCLEAR shown but never
+  scored (no direction was claimed). Summary strip shows hit rate. Verified live:
+  the first logged call (FOUR buy @ $41.98) correctly reads WRONG at -0.88%.
+- **Price alerts** (`/api/robinhood/alerts` GET/POST → create_alert/get_alerts
+  MCP tools): one click sets an alert ±5% from the current price; the push
+  notification arrives from the user's actual Robinhood app, so no background
+  jobs are needed.
+- **Position guard**: the trade panel now fetches Robinhood positions and shows
+  "You already hold N TICKER at avg cost X, currently Y% up/down — adding more
+  increases your concentration" before an order form is used.
+- **Earnings-week warning**: ticker snapshots now carry earnings dates
+  (from the movers feed); the trade panel shows a volatility warning when
+  earnings land within 7 days of an order.
+
+**Verification:** 32/32 tests, typecheck/build/smoke clean, track record
+rendered and scored correctly (screenshot), alerts endpoint live.
+
 ## Not done (per instructions)
 
 - No new git commit/push this session (work sessions 1–2 committed through d77a113 and pushed to the private repo; the coordinator reviews publication).

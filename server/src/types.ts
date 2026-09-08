@@ -86,6 +86,14 @@ export interface VerdictLogEntry {
   created_at: string;
 }
 
+export interface ScoredVerdict extends VerdictLogEntry {
+  price_now: number | null;
+  change_pct: number | null;
+  elapsed_days: number;
+  direction: 'bullish' | 'bearish' | 'neutral';
+  outcome: 'correct' | 'wrong' | 'flat' | 'un_scored';
+}
+
 export interface AppData {
   verdict_log: VerdictLogEntry[];
   watchlist: WatchlistItem[];

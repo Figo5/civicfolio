@@ -13,7 +13,7 @@ export function ChatPanel() {
   const [active, setActive] = useState<string>(GENERAL);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [modeAvailable, setModeAvailable] = useState(false);
-  const [mode, setMode] = useState<'deterministic' | 'llm'>('deterministic');
+  const [mode, setMode] = useState<'deterministic' | 'llm'>('llm');
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);

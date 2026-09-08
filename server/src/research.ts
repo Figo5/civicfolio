@@ -11,6 +11,7 @@
 
 import type { AppData, ChatCitation } from './types.js';
 import { getQuotes } from './quotes.js';
+import { buildInsights } from './insights.js';
 
 export interface EngineAnswer {
   content: string;
@@ -29,16 +30,12 @@ const answer = (content: string, citations: ChatCitation[] = []): EngineAnswer =
 });
 
 const HELP = [
-  'I compute from what this app holds — your watchlist, your paper positions, and live quotes.',
-  'Try:',
+  'I sort and quote from live market data. Try:',
+  '- "what should i buy?" — today\'s highest-scoring ideas',
   '- "quote NVDA" or just "NVDA"',
   '- "how is my portfolio doing?"',
-  '- "what is my concentration?"',
-  '- "show my watchlist"',
-  '- "my trades"',
   '',
-  'For a view on whether to buy or sell, use Research on a ticker — that runs the AI agent.',
-  'I do not forecast, set targets, or estimate probabilities.',
+  'For a judgement call with entry and exit levels, open a ticker and press Research — that runs the AI agent.',
 ].join('\n');
 
 const STOPWORDS = new Set([
@@ -59,6 +56,28 @@ export async function answerQuestion(question: string, data: AppData, threadTick
       'I abstain: I do not forecast prices, set targets, or estimate probabilities — none of that is derivable from the data here.\n\n' +
       'I can give you the current quote, your position and its unrealized P&L, and your concentration. ' +
       'For a judgement call with entry and exit levels, run Research on the ticker; that uses the AI agent and shows which levels are grounded in real data.',
+    );
+  }
+
+  // ---- what should I buy: surface today's screened ideas ---------------
+  // The most natural question for this app. The arithmetic screen already
+  // exists (insights.ts) — the chat just never learned about it.
+  if (/(what should i buy|what to buy|any ideas|good (buy|stock|idea)|stock ideas?|top picks?|best scoring)/.test(q)) {
+    const board = await buildInsights();
+    const picks = board.best_buys.slice(0, 5);
+    if (picks.length === 0) {
+      return answer('The market screen found nothing worth a closer look right now — flat day, or the data feed is warming up. Try again after the next refresh.');
+    }
+    const lines = picks.map((p) =>
+      `- ${p.ticker} (${p.name}) — score ${p.score}. ${p.reasons.slice(0, 2).join('; ')}.` +
+      (p.cautions.length > 0 ? ` Watch out: ${p.cautions[0]}.` : ''),
+    );
+    return answer(
+      `Today's highest-scoring ideas from the live market screen (universe of ${board.universe_size} movers):\n` +
+      lines.join('\n') +
+      '\n\nScores are arithmetic over observable facts — volume, range position, trend — not predictions. ' +
+      'Open a ticker and run Research for the AI verdict with entry/exit levels before acting.',
+      picks.map((p) => ({ record_id: p.ticker, source_name: 'live market screen' })),
     );
   }
 

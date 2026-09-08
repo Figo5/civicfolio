@@ -124,6 +124,22 @@ export const api = {
   removeIdea: (id: string) => del<{ ok: boolean }>(`/api/ideas/${encodeURIComponent(id)}`),
   addWatch: (ticker: string, thesis: string, company?: string) => post<{ item: { id: string } }>('/api/watchlist', { ticker, thesis, company }),
   removeWatch: (id: string) => del<{ ok: boolean }>(`/api/watchlist/${encodeURIComponent(id)}`),
+  // Robinhood (official Trading MCP)
+  rhStatus: () =>
+    get<{ connected: boolean; expires_at: string | null; has_refresh: boolean; account_hint: string | null; expired_soon?: boolean; note: string }>('/api/robinhood/status'),
+  rhConnect: () => post<{ authorization_url: string }>('/api/robinhood/connect', {}),
+  rhDisconnect: () => post<{ ok: boolean }>('/api/robinhood/disconnect', {}),
+  rhVerify: () => post<{ ok: boolean; error?: string; tools?: string[] }>('/api/robinhood/verify', {}),
+  rhReview: (t: { ticker: string; side: 'buy' | 'sell'; quantity: number; kind?: 'market' | 'limit'; limit_price?: number | null }) =>
+    post<{ review: unknown }>('/api/robinhood/review', t),
+  rhPlace: (t: { ticker: string; side: 'buy' | 'sell'; quantity: number; kind?: 'market' | 'limit'; limit_price?: number | null; client_request_id?: string; confirm: true }) =>
+    post<{ order: unknown }>('/api/robinhood/place', t),
+  rhPositions: () => get<{ positions: unknown }>('/api/robinhood/positions'),
+  verdictLogScored: () =>
+    get<{ entries: ScoredVerdict[]; summary: TrackRecordSummary }>('/api/verdict-log'),
+  rhAlerts: () => get<{ alerts: unknown }>('/api/robinhood/alerts'),
+  rhCreateAlert: (ticker: string, direction: 'above' | 'below', price: number) =>
+    post<{ alert: unknown }>('/api/robinhood/alerts', { ticker, direction, price }),
 };
 
 export const fmtUsd = (n: number): string =>
@@ -150,6 +166,9 @@ export interface TickerSnapshot {
   sector: string | null; industry: string | null;
   fundamentals: { company_name: string; revenue_usd: number | null; net_income_usd: number | null; diluted_eps: number | null; source_form: string | null; source_filed: string | null; source_url: string } | null;
   fundamentals_unavailable: string | null;
+  next_earnings: string | null;
+  earnings_in_days: number | null;
+  earnings_is_estimate: boolean;
 }
 
 export interface LevelCheck {
@@ -191,4 +210,15 @@ export interface VerdictLogEntry {
   price_at_call: number | null; entry_zone: string | null; exit_target: string | null;
   stop_loss: string | null; hold_horizon: string | null;
   grounded_levels: number; unsupported_levels: number; model: string; created_at: string;
+}
+
+export interface ScoredVerdict extends VerdictLogEntry {
+  price_now: number | null; change_pct: number | null; elapsed_days: number;
+  direction: 'bullish' | 'bearish' | 'neutral';
+  outcome: 'correct' | 'wrong' | 'flat' | 'un_scored';
+}
+
+export interface TrackRecordSummary {
+  total: number; scored: number; correct: number; wrong: number;
+  hit_rate: number | null; avg_change_pct: number | null; bullish_count: number;
 }

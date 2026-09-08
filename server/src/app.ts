@@ -10,6 +10,12 @@ import { getMovers, getPriceHistory, getTickerNews, type MoverKind } from './mar
 import { buildInsights } from './insights.js';
 import { getFundamentals } from './fundamentals.js';
 import { runResearchAgent, getAgentConfig, verifyLevels } from './ollamaAgent.js';
+import {
+  beginAuthorization, completeAuthorization, connectionState, mcpInitialize,
+  reviewOrder, placeOrder, getPositions, clearTokens, isExpiredSoon,
+} from './robinhood.js';
+import { getPortfolio as rhPortfolio, listAlerts, createPriceAlert } from './alerts.js';
+import { scoreVerdicts, summarizeScored } from './trackRecord.js';
 import { cleanText } from './validate.js';
 import type { AppData, ChatMessage } from './types.js';
 
@@ -229,9 +235,10 @@ export function createApp(): express.Express {
     res.json(await buildInsights());
   });
 
-  // Recommendations as they were made, so they can be scored later.
-  app.get('/api/verdict-log', (_req, res) => {
-    res.json({ entries: [...data().verdict_log].reverse().slice(0, 200) });
+  // Recommendations as they were made, scored against what the market did.
+  app.get('/api/verdict-log', async (_req, res) => {
+    const scored = await scoreVerdicts(data().verdict_log);
+    res.json({ entries: scored.reverse(), summary: summarizeScored(scored) });
   });
 
   // ---- live market ----
@@ -258,16 +265,23 @@ export function createApp(): express.Express {
     const symbol = String(req.params.symbol ?? '').trim().toUpperCase();
     if (!/^[A-Z]{1,10}$/.test(symbol)) return fail(res, 400, 'invalid ticker');
 
-    const [quotes, history, newsBundle, fundamentals] = await Promise.all([
+    const [quotes, history, newsBundle, fundamentals, movers] = await Promise.all([
       getQuotes([symbol]),
       getPriceHistory(symbol),
       getTickerNews(symbol, 6),
       getFundamentals(symbol),
+      getMovers('most_actives', 50).catch(() => []),
     ]);
     const quote = quotes.quotes[0] ?? null;
     if (!quote && !history) {
       return fail(res, 404, `no market data for ${symbol} — check the ticker`);
     }
+    const mover = movers.find((m) => m.ticker === symbol) ?? null;
+    const daysTo = (iso: string | null): number | null => {
+      if (!iso) return null;
+      const d = Math.round((Date.parse(iso) - Date.now()) / 86400000);
+      return Number.isNaN(d) ? null : d;
+    };
     res.json({
       ticker: symbol,
       quote,
@@ -277,6 +291,9 @@ export function createApp(): express.Express {
       industry: newsBundle.industry,
       fundamentals: 'cik' in fundamentals ? fundamentals : null,
       fundamentals_unavailable: 'cik' in fundamentals ? null : fundamentals.reason,
+      next_earnings: mover?.next_earnings ?? null,
+      earnings_in_days: daysTo(mover?.next_earnings ?? null),
+      earnings_is_estimate: mover?.earnings_is_estimate ?? false,
       fetched_at: new Date().toISOString(),
     });
   });
@@ -297,7 +314,7 @@ export function createApp(): express.Express {
         last_at: all.filter((m) => m.ticker === t).slice(-1)[0]?.ts ?? null,
       }))
       .sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
-    res.json({ mode_available: getLlmConfig().enabled, ticker: ticker || null, messages: messages.slice(-100), threads });
+    res.json({ mode_available: getLlmConfig().enabled || getAgentConfig().enabled, ticker: ticker || null, messages: messages.slice(-100), threads });
   });
 
   app.post('/api/chat', async (req, res) => {
@@ -312,8 +329,9 @@ export function createApp(): express.Express {
 
     if (mode === 'llm') {
       const cfg = getLlmConfig();
-      if (!cfg.enabled) {
-        return fail(res, 400, 'LLM mode not configured on the server. Deterministic mode works without any API key.');
+      const agent = getAgentConfig();
+      if (!cfg.enabled && !agent.enabled) {
+        return fail(res, 400, 'LLM mode not configured on the server (start the Ollama daemon or set OPENAI_API_KEY).');
       }
       // Minimal lower-trust projection: disclosures only, no user content.
       // Portfolio goes to the external endpoint only when the user asks for it.
@@ -496,6 +514,164 @@ export function createApp(): express.Express {
   app.post('/api/demo/clear', (_req, res) => {
     resetEmpty();
     res.json({ ok: true, counts: { disclosures: 0, watchlist: 0, ideas: 0, trades: 0 } });
+  });
+
+  // ---- Robinhood (official Trading MCP) ----
+  // Connect: OAuth2 + PKCE; the callback lands on this same server.
+  // Trading: review first, then place — and only on explicit user action.
+  app.get('/api/robinhood/status', (_req, res) => {
+    const st = connectionState();
+    res.json({
+      ...st,
+      expired_soon: st.connected && isExpiredSoon(),
+      note: st.connected
+        ? 'Connected to your Robinhood Agentic account via the official Trading MCP. Orders are placed only after you review and confirm them here.'
+        : 'Connect Robinhood to place real orders from this app. Requires opening a Robinhood Agentic account (free) and authorizing once.',
+    });
+  });
+
+  app.post('/api/robinhood/connect', async (_req, res) => {
+    try {
+      const pending = await beginAuthorization();
+      res.json({ authorization_url: pending.authorization_url });
+    } catch (e) {
+      fail(res, 502, `Robinhood auth discovery failed: ${(e as Error).message}`);
+    }
+  });
+
+  // OAuth callback (GET, from Robinhood's browser redirect).
+  app.get('/robinhood/callback', async (req, res) => {
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    const error = typeof req.query.error === 'string' ? req.query.error : '';
+    if (error) {
+      res.status(400).send(`Robinhood authorization failed: ${error}. You can close this window.`);
+      return;
+    }
+    if (!code) {
+      res.status(400).send('Missing authorization code.');
+      return;
+    }
+    const done = await completeAuthorization(code, state);
+    if (!done.ok) {
+      res.status(400).send(`Authorization failed: ${done.error}`);
+      return;
+    }
+    res.send('<!doctype html><html><body style="background:#050505;color:#22c55e;font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><h1>Robinhood connected — you can close this window and return to Civicfolio.</h1></body></html>');
+  });
+
+  app.post('/api/robinhood/disconnect', (_req, res) => {
+    clearTokens();
+    res.json({ ok: true });
+  });
+
+  // Verify the connection actually works (initialize + list tools).
+  app.post('/api/robinhood/verify', async (_req, res) => {
+    try {
+      const r = await mcpInitialize();
+      res.json(r);
+    } catch (e) {
+      fail(res, 502, String((e as Error).message ?? e));
+    }
+  });
+
+  // Pre-trade review: server-side simulation with Robinhood's own warnings.
+  app.post('/api/robinhood/review', async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const ticker = String(body.ticker ?? '').trim().toUpperCase();
+    const side = body.side === 'sell' ? 'sell' : 'buy';
+    const quantity = body.quantity;
+    const kind = body.kind === 'limit' ? 'limit' : 'market';
+    const limitPrice = body.limit_price;
+    if (!/^[A-Z]{1,10}$/.test(ticker)) return fail(res, 400, 'invalid ticker');
+    if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) return fail(res, 400, 'quantity must be a positive finite number');
+    if (kind === 'limit' && (typeof limitPrice !== 'number' || !Number.isFinite(limitPrice) || limitPrice <= 0)) {
+      return fail(res, 400, 'limit orders need a positive limit_price');
+    }
+    try {
+      const r = await reviewOrder({ ticker, side, quantity, kind, limit_price: kind === 'limit' ? limitPrice as number : null });
+      if (!r.ok) return fail(res, 502, r.error ?? 'review failed');
+      res.json({ review: r.review });
+    } catch (e) {
+      fail(res, 502, String((e as Error).message ?? e));
+    }
+  });
+
+  // Place a real order. Guarded three ways: explicit user confirmation in the
+  // body, a prior review in the same request, and idempotency key.
+  app.post('/api/robinhood/place', async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.confirm !== true) {
+      return fail(res, 400, 'Order not confirmed — this endpoint places REAL orders and requires confirm:true after you review the pre-trade check.');
+    }
+    const ticker = String(body.ticker ?? '').trim().toUpperCase();
+    const side = body.side === 'sell' ? 'sell' : 'buy';
+    const quantity = body.quantity;
+    const kind = body.kind === 'limit' ? 'limit' : 'market';
+    const limitPrice = body.limit_price;
+    if (!/^[A-Z]{1,10}$/.test(ticker)) return fail(res, 400, 'invalid ticker');
+    if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity <= 0) return fail(res, 400, 'quantity must be a positive finite number');
+    if (kind === 'limit' && (typeof limitPrice !== 'number' || !Number.isFinite(limitPrice) || limitPrice <= 0)) {
+      return fail(res, 400, 'limit orders need a positive limit_price');
+    }
+    try {
+      const r = await placeOrder({
+        ticker, side, quantity, kind,
+        limit_price: kind === 'limit' ? limitPrice as number : null,
+        client_id: typeof body.client_request_id === 'string' ? body.client_request_id : undefined,
+      });
+      if (!r.ok) return fail(res, 502, r.error ?? 'order failed');
+      res.json({ order: r.order });
+    } catch (e) {
+      fail(res, 502, String((e as Error).message ?? e));
+    }
+  });
+
+  app.get('/api/robinhood/positions', async (_req, res) => {
+    try {
+      const r = await getPositions();
+      if (!r.ok) return fail(res, 502, r.error ?? 'failed to load positions');
+      res.json({ positions: r.positions });
+    } catch (e) {
+      fail(res, 502, String((e as Error).message ?? e));
+    }
+  });
+
+  app.get('/api/robinhood/portfolio', async (_req, res) => {
+    try {
+      const r = await rhPortfolio();
+      if (!r.ok) return fail(res, 502, r.error ?? 'failed to load portfolio');
+      res.json({ portfolio: r.portfolio });
+    } catch (e) {
+      fail(res, 502, String((e as Error).message ?? e));
+    }
+  });
+
+  // ---- price alerts (land in the user's real Robinhood app) ----
+  app.get('/api/robinhood/alerts', async (_req, res) => {
+    try {
+      const r = await listAlerts();
+      if (!r.ok) return fail(res, 502, r.error ?? 'failed to load alerts');
+      res.json({ alerts: r.alerts });
+    } catch (e) {
+      fail(res, 502, String((e as Error).message ?? e));
+    }
+  });
+
+  app.post('/api/robinhood/alerts', async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const symbol = String(body.ticker ?? body.symbol ?? '').trim().toUpperCase();
+    const direction = body.direction === 'below' ? 'below' : 'above';
+    const price = body.price;
+    if (!/^[A-Z]{1,10}$/.test(symbol)) return fail(res, 400, 'invalid ticker');
+    if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return fail(res, 400, 'price must be a positive finite number');
+    try {
+      const r = await createPriceAlert(symbol, direction, price);
+      if (!r.ok) return fail(res, 502, r.error ?? 'failed to create alert');
+      res.json({ alert: r.alert });
+    } catch (e) {
+      fail(res, 502, String((e as Error).message ?? e));
+    }
   });
 
   // ---- settings (no secrets) ----

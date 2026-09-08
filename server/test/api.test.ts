@@ -53,10 +53,15 @@ test('chat abstains on price questions (no fabricated prices)', async () => {
 
 
 
-test('chat refuses LLM mode when unconfigured', async () => {
-  const res = await postJson('/api/chat', { question: 'hi', mode: 'llm' });
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /not configured/i);
+test('chat LLM mode works when the Ollama agent transport is available', async () => {
+  // Advisor default: the LLM should give a direct view, not a refusal.
+  const res = await postJson('/api/chat', { question: 'is BIDU a good buy right now?', mode: 'llm' });
+  // Either the local daemon is up (200, advisor answer) or it is down (502 transport error).
+  // What it must never be: the old 400 refusal, since the agent transport exists.
+  assert.ok([200, 502].includes(res.status), `got ${res.status}: ${JSON.stringify(res.body).slice(0, 150)}`);
+  if (res.status === 200) {
+    assert.doesNotMatch(res.body.message.content, /^I abstain/i, 'advisor posture must not open with a refusal');
+  }
 });
 
 // ---- research agent endpoint ---------------------------------------------
@@ -88,7 +93,7 @@ test('agent config prefers local daemon by default and reports search availabili
     const cfg = getAgentConfig();
     assert.equal(cfg.chatHost, 'http://127.0.0.1:11434', 'defaults to local daemon');
     assert.equal(cfg.searchEnabled, false, 'no key → no web search');
-    assert.equal(cfg.model, 'gpt-oss:120b-cloud');
+    assert.equal(cfg.model, 'deepseek-v4-flash:0731-cloud');
 
     process.env.OLLAMA_API_KEY = 'test-key';
     const cfg2 = getAgentConfig();
@@ -460,30 +465,30 @@ test('quotes: marks tagged by source, unresolvable symbols reported not invented
 test('advisor mode is server-controlled and shapes the prompt', async () => {
   const { getLlmConfig, buildSystemPrompt } = await import('../src/llm.js');
 
-  // Default posture declines directive calls.
+  // Default posture is advisor: direct recommendations.
   delete process.env['CIVICFOLIO_ADVISOR_MODE'];
-  assert.equal(getLlmConfig().advisorMode, 'analyst');
-  const analyst = buildSystemPrompt('analyst');
-  assert.match(analyst, /Do NOT issue directive verdicts/);
-
-  // Owner opts in to direct recommendations.
-  process.env['CIVICFOLIO_ADVISOR_MODE'] = 'advisor';
   assert.equal(getLlmConfig().advisorMode, 'advisor');
   const advisor = buildSystemPrompt('advisor');
   assert.match(advisor, /direct, actionable assessment/);
   assert.match(advisor, /conviction level/);
   // Even in advisor mode, fabricated precision stays off the table.
-  assert.match(advisor, /No fabricated price targets/);
+  assert.match(advisor, /No invented probability percentages/);
   assert.doesNotMatch(advisor, /Do NOT issue directive verdicts/);
 
-  // An unrecognised value falls back to the safer posture rather than advisor.
-  process.env['CIVICFOLIO_ADVISOR_MODE'] = 'yolo';
+  // Owner can opt down to analyst (no directive calls).
+  process.env['CIVICFOLIO_ADVISOR_MODE'] = 'analyst';
   assert.equal(getLlmConfig().advisorMode, 'analyst');
+  const analyst = buildSystemPrompt('analyst');
+  assert.match(analyst, /Do NOT issue directive verdicts/);
+
+  // An unrecognised value falls back to advisor (the owner's default intent).
+  process.env['CIVICFOLIO_ADVISOR_MODE'] = 'yolo';
+  assert.equal(getLlmConfig().advisorMode, 'advisor');
   delete process.env['CIVICFOLIO_ADVISOR_MODE'];
 
   // The browser cannot flip it: settings only reports the mode.
   const s = await agent().get('/api/settings');
-  assert.equal(s.body.providers.llm_endpoint.advisor_mode, 'analyst');
+  assert.equal(s.body.providers.llm_endpoint.advisor_mode, 'advisor');
 });
 
 // ---- fundamentals (SEC EDGAR) -------------------------------------------
