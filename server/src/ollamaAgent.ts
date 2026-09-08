@@ -192,7 +192,7 @@ async function duckDuckGoSearch(query: string): Promise<AgentSources[]> {
   }
 }
 
-async function chatOnce(model: string, apiKey: string, messages: OllamaMessage[], useTools: boolean): Promise<{ message?: OllamaMessage; error?: string }> {
+export async function chatOnce(model: string, apiKey: string, messages: OllamaMessage[], useTools: boolean): Promise<{ message?: OllamaMessage; error?: string }> {
   const host = getAgentConfig().chatHost;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);

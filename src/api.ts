@@ -132,6 +132,8 @@ export const api = {
   removeWatch: (id: string) => del<{ ok: boolean }>(`/api/watchlist/${encodeURIComponent(id)}`),
   verdictLogScored: () =>
     get<{ entries: ScoredVerdict[]; summary: TrackRecordSummary }>('/api/verdict-log'),
+  fund: () => get<AiFundView>('/api/fund'),
+  runFund: () => post<{ ran_at: string; actions: { ticker: string; action: string; detail: string }[]; equity_usd: number }>('/api/fund/run', {}),
 };
 
 export const fmtUsd = (n: number): string =>
@@ -209,6 +211,16 @@ export interface TrackRecordSummary {
   total: number; measured: number; unmeasured: number;
   avg_change_pct: number | null; bullish_count: number;
   disclaimer: string;
+}
+
+export interface AiFundView {
+  cash_usd: number;
+  equity_usd: number;
+  pnl_usd: number;
+  realized_pnl_usd: number;
+  positions: { ticker: string; quantity: number; avg_cost: number; mark: number; value_usd: number; pnl_usd: number; stop: number | null }[];
+  trades: { id: string; ticker: string; side: 'buy' | 'sell'; quantity: number; price: number; quote_as_of: string; executed_at: string; rationale: string; realized_pnl_usd?: number; pnl_pct?: number }[];
+  lessons: { id: string; ticker: string; lesson: string; closed_at: string }[];
 }
 
 export interface ScoredVerdict extends VerdictLogEntry {

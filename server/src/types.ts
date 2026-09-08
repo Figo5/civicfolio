@@ -119,7 +119,45 @@ export interface AppData {
   trades: PaperTrade[];
   portfolio: PortfolioState;
   chat: ChatMessage[];
+  ai_fund: AiFundState;
+  ai_lessons: AiLesson[];
   meta: {
     schema_version: number;
   };
+}
+
+/** The AI's fake-money fund. Paper only — no broker exists anywhere in this app. */
+export interface AiFundState {
+  cash_usd: number;
+  started_at: string;
+  positions: Record<string, { quantity: number; avg_cost: number }>;
+  // ticker -> latest known price (from the delayed feed) for marking equity
+  marks: Record<string, number>;
+  // ticker -> active stop from the trade thesis
+  stops: Record<string, number>;
+  trades: AiTrade[];
+}
+
+export interface AiTrade {
+  id: string;
+  verdict_id: string; // links to the research entry that caused the trade
+  ticker: string;
+  side: 'buy' | 'sell';
+  quantity: number;
+  price: number; // real delayed quote at execution time, never model-typed
+  quote_as_of: string;
+  executed_at: string;
+  rationale: string;
+  // Set on closes: the round-trip result that feeds the reflection loop.
+  realized_pnl_usd?: number;
+  pnl_pct?: number;
+}
+
+/** What the fund learned from a closed trade; injected into future research. */
+export interface AiLesson {
+  id: string;
+  ticker: string;
+  trade_id: string;
+  lesson: string; // one sentence, written by the reflection pass
+  closed_at: string;
 }

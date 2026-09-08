@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea, type DataSourceStatus } from '../api';
 import { TrackRecord } from './TrackRecord';
+import { AiFund } from './AiFund';
 
 const MOVER_TABS = [
   { kind: 'most_actives' as const, label: 'Most active' },
@@ -408,6 +409,7 @@ export function OnePage() {
         {selected && <TickerDetail ticker={selected} onClose={() => setSelected(null)} />}
       </div>
 
+      <AiFund onOpen={openTicker} />
       <TrackRecord onOpen={openTicker} />
 
     </div>

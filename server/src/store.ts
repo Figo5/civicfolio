@@ -1,4 +1,4 @@
-import type { AppData, WatchlistItem, TrackedIdea, PaperTrade, PortfolioState, ChatMessage } from './types.js';
+import type { AppData, WatchlistItem, TrackedIdea, PaperTrade, PortfolioState, ChatMessage, AiTrade } from './types.js';
 import { isFiniteNumber } from './validate.js';
 
 import fs from 'node:fs';
@@ -32,6 +32,8 @@ export function emptyData(): AppData {
     verdict_log: [],
     portfolio: emptyPortfolio(),
     chat: [],
+    ai_fund: emptyAiFund(),
+    ai_lessons: [],
     meta: { schema_version: 2 },
   };
 }
@@ -77,6 +79,51 @@ function sanitizePortfolio(p: unknown): PortfolioState {
   return { cash_usd: cash, positions, marks };
 }
 
+export function emptyAiFund(): AppData['ai_fund'] {
+  return { cash_usd: 10000, started_at: new Date().toISOString(), positions: {}, marks: {}, stops: {}, trades: [] };
+}
+
+// Sanitize a persisted AI fund: finite numbers only, bounded trades. Corrupt
+// entries are dropped, never guessed.
+function sanitizeAiFund(v: unknown): AppData['ai_fund'] {
+  const base = emptyAiFund();
+  if (!v || typeof v !== 'object') return base;
+  const obj = v as Record<string, unknown>;
+  const fund: AppData['ai_fund'] = {
+    cash_usd: isFiniteNumber(obj.cash_usd) && (obj.cash_usd as number) >= 0 ? (obj.cash_usd as number) : base.cash_usd,
+    started_at: typeof obj.started_at === 'string' ? obj.started_at : base.started_at,
+    positions: {}, marks: {}, stops: {},
+    trades: Array.isArray(obj.trades) ? (obj.trades as AppData['ai_fund']['trades']).filter((t) =>
+      t && typeof t === 'object' && typeof t.ticker === 'string' && isFiniteNumber(t.price)
+    ).slice(0, 500) : [],
+  };
+  if (obj.positions && typeof obj.positions === 'object') {
+    for (const [ticker, p] of Object.entries(obj.positions as Record<string, unknown>)) {
+      if (!p || typeof p !== 'object') continue;
+      const q = (p as Record<string, unknown>).quantity, c = (p as Record<string, unknown>).avg_cost;
+      if (isFiniteNumber(q) && (q as number) > 0 && isFiniteNumber(c) && (c as number) > 0) {
+        fund.positions[String(ticker).toUpperCase().slice(0, 12)] = { quantity: q as number, avg_cost: c as number };
+      }
+    }
+  }
+  for (const key of ['marks', 'stops'] as const) {
+    const src = obj[key];
+    if (src && typeof src === 'object') {
+      for (const [ticker, n] of Object.entries(src as Record<string, unknown>)) {
+        if (isFiniteNumber(n) && (n as number) > 0) fund[key][String(ticker).toUpperCase().slice(0, 12)] = n as number;
+      }
+    }
+  }
+  return fund;
+}
+
+function sanitizeLessons(v: unknown): AppData['ai_lessons'] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((l) => l && typeof l === 'object'
+    && typeof l.ticker === 'string' && typeof l.lesson === 'string' && l.lesson.length <= 500
+  ).slice(0, 100);
+}
+
 export function load(): AppData {
   if (cache) return cache;
   const file = dataFile();
@@ -96,6 +143,8 @@ export function load(): AppData {
         chat: Array.isArray(parsed.chat)
           ? (parsed.chat as ChatMessage[]).filter((m) => !/stored disclosure activity|demo \/ \d+ imported/i.test(String(m.content ?? '')))
           : base.chat,
+        ai_fund: sanitizeAiFund(parsed.ai_fund),
+        ai_lessons: sanitizeLessons(parsed.ai_lessons),
         meta: parsed.meta && typeof parsed.meta === 'object' ? { ...base.meta, ...parsed.meta } : base.meta,
       };
       cache = data;

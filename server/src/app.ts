@@ -10,6 +10,8 @@ import { getMovers, getPriceHistory, getTickerNews, type MoverKind } from './mar
 import { buildInsights } from './insights.js';
 import { getFundamentals } from './fundamentals.js';
 import { runResearchAgent, getAgentConfig, verifyLevels, webSearch, type AgentSources } from './ollamaAgent.js';
+import { runFundLoop } from './fundLoop.js';
+import { fundEquity } from './aiFund.js';
 import { scoreVerdicts, summarizeScored } from './trackRecord.js';
 import { cleanText } from './validate.js';
 import type { AppData, ChatMessage } from './types.js';
@@ -372,6 +374,20 @@ export function createApp(): express.Express {
       if (!cfg.enabled && !agent.enabled) {
         return fail(res, 400, 'LLM mode not configured on the server (start the Ollama daemon or set OPENAI_API_KEY).');
       }
+      // Fund commands: the user can tell the agent to run its paper fund.
+      if (/\brun (the )?fund\b|make (a |some )?trades?\b|trade (for )?yourself\b|do your (thing|trades)\b/i.test(question)) {
+        const loop = await runFundLoop();
+        if (!loop.ok) return fail(res, 502, loop.error);
+        const lines = loop.result.actions.map((a) => `- **${a.ticker}** ${a.action}: ${a.detail}`);
+        const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString() };
+        const msg: ChatMessage = {
+          role: 'assistant',
+          content: `Fund run complete — equity $${loop.result.equity_usd.toFixed(2)}.\n\n${lines.join('\n')}`,
+          mode: 'llm', ts: new Date().toISOString(),
+        };
+        update((draft) => { draft.chat.push(userMsg, msg); return { committed: true, value: undefined as void }; });
+        return res.json({ message: msg });
+      }
       // Minimal lower-trust projection: no user content is sent.
       // Full research context — the same pipeline the Research button gets:
       // live quotes, headlines, top movers, SEC fundamentals, plus a real web
@@ -704,6 +720,42 @@ export function createApp(): express.Express {
     app[m]('/api/robinhood/*', brokerGone);
   }
   app.get('/robinhood/callback', brokerGone);
+
+  // ---- AI fund (paper only: fake money, real delayed quotes) ----
+  // The agent researches, decides, and trades its own $10k fund. The model
+  // never types an execution price and never sizes positions — the code does
+  // all arithmetic. No broker exists in this app; nothing here touches real money.
+  app.get('/api/fund', (_req, res) => {
+    const d = data();
+    const positions = Object.entries(d.ai_fund.positions).map(([ticker, p]) => {
+      const mark = d.ai_fund.marks[ticker] ?? p.avg_cost;
+      const mv = mark * p.quantity;
+      return {
+        ticker, quantity: p.quantity, avg_cost: p.avg_cost, mark,
+        value_usd: Number(mv.toFixed(2)),
+        pnl_usd: Number((mv - p.avg_cost * p.quantity).toFixed(2)),
+        stop: d.ai_fund.stops[ticker] ?? null,
+      };
+    });
+    const equity = fundEquity(d);
+    const realized = d.ai_fund.trades.filter((t) => typeof t.realized_pnl_usd === 'number')
+      .reduce((s, t) => s + (t.realized_pnl_usd ?? 0), 0);
+    res.json({
+      cash_usd: Number(d.ai_fund.cash_usd.toFixed(2)),
+      equity_usd: Number(equity.toFixed(2)),
+      pnl_usd: Number((equity - 10000).toFixed(2)),
+      realized_pnl_usd: Number(realized.toFixed(2)),
+      positions,
+      trades: d.ai_fund.trades.slice(0, 50),
+      lessons: d.ai_lessons.slice(0, 20),
+    });
+  });
+
+  app.post('/api/fund/run', async (_req, res) => {
+    const result = await runFundLoop();
+    if (!result.ok) return fail(res, 502, result.error);
+    res.json(result.result);
+  });
 
   // ---- settings (no secrets) ----
   app.get('/api/settings', (_req, res) => {
