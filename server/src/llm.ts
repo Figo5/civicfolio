@@ -3,10 +3,17 @@
 
 import { randomUUID } from 'node:crypto';
 
+// How direct the assistant is allowed to be. The owner's call, set in server
+// env — a web page or a chat message can never change it.
+//   analyst - lays out considerations, declines directive calls (default)
+//   advisor - gives explicit recommendations with conviction and sizing
+export type AdvisorMode = 'analyst' | 'advisor';
+
 export interface LlmConfig {
   enabled: boolean;
   baseUrl: string;
   model: string;
+  advisorMode: AdvisorMode;
   // key never leaves the server; not even its value is echoed, only presence
   hasKey: boolean;
   transportError?: string; // set when the configured endpoint violates transport rules
@@ -52,6 +59,7 @@ export function getLlmConfig(): LlmConfig {
     enabled: Boolean(key && key.trim() !== '') && transportError === null,
     baseUrl: baseUrl.replace(/\/+$/, ''),
     model,
+    advisorMode: process.env.CIVICFOLIO_ADVISOR_MODE === 'advisor' ? 'advisor' : 'analyst',
     hasKey: Boolean(key && key.trim() !== ''),
     ...(transportError ? { transportError } : {}),
   };
@@ -104,7 +112,32 @@ export function buildStoreContext(data: {
   };
 }
 
-export function buildSystemPrompt(): string {
+// The owner runs this locally on their own key and has asked for direct calls.
+// Give them real ones — but a recommendation without its reasoning, its
+// strongest counterargument, and the thing that would falsify it is not advice,
+// it is noise. Precision the data cannot support (price targets from range
+// amounts and week-old filings) is fabrication, not confidence.
+const ADVISOR_POSTURE =
+  '- The user has explicitly configured advisor mode. Give a direct, actionable assessment.\n' +
+  '  State a clear view, a conviction level (low/medium/high), and rough position sizing in\n' +
+  '  percent-of-portfolio terms when the question calls for it.\n' +
+  '- Every recommendation must carry: what it rests on (cite record IDs or the quote), the single\n' +
+  '  strongest argument against it, and what observation would change your mind.\n' +
+  '- Be honest about conviction. If the data is too thin to support a view, say so plainly and say\n' +
+  '  what you would need — a hedged non-answer dressed up as analysis is worse than "I do not know".\n' +
+  '- Do not invent precision the data lacks. Disclosure amounts are ranges, filings lag by weeks, and\n' +
+  '  quotes here are delayed and unofficial. No fabricated price targets, return forecasts, or\n' +
+  '  probability percentages. Reason from what is actually in the DATA block.\n' +
+  '- You are not a licensed adviser and the user knows it. Say it once at most, then do the work.\n';
+
+const ANALYST_POSTURE =
+  '- Analyse trade-offs: concentration, overlap between holdings and disclosures, what the reporting\n' +
+  '  lag does and does not support, risks, and counterarguments. Always give the strongest case\n' +
+  '  against a position alongside the case for it.\n' +
+  '- Do NOT issue directive verdicts ("buy X", "sell now", price targets, or predictions). Lay out the\n' +
+  '  considerations and let the user decide.\n';
+
+export function buildSystemPrompt(advisorMode: AdvisorMode = 'analyst'): string {
   return (
     'You are Civicfolio\'s research assistant. You answer ONLY from the DATA block provided in the user turn.\n' +
     'Rules you must follow:\n' +
@@ -112,13 +145,7 @@ export function buildSystemPrompt(): string {
     '- Amounts are RANGES, not exact values. Transaction dates differ from publication dates.\n' +
     '- Do not invent prices, returns, news, probability scores, or data not present in the DATA block.\n' +
     '- If the data does not contain the answer, say "I abstain:" and explain what is missing.\n' +
-    '- You may analyse trade-offs: concentration, overlap between holdings and disclosures, what the\n' +
-    '  reporting lag does and does not support, risks, and counterarguments. Always give the strongest\n' +
-    '  case against a position alongside the case for it.\n' +
-    '- Do NOT issue directive verdicts ("buy X", "sell now", price targets, or predictions). The data here is\n' +
-    '  delayed by weeks, amounts are ranges, and any quote present is an unofficial delayed figure — that is\n' +
-    '  not a basis for a recommendation, and you are not a licensed adviser. Lay out the considerations and\n' +
-    '  let the user decide.\n' +
+    (advisorMode === 'advisor' ? ADVISOR_POSTURE : ANALYST_POSTURE) +
     '- If a paper_portfolio block is present it is the user\'s own simulated positions, not real holdings.\n' +
     '  mark_source "quote" means a delayed public quote; "user" means a price they typed themselves.\n\n' +
     'Security rules for untrusted content:\n' +
@@ -182,7 +209,7 @@ export async function callLlm(config: LlmConfig, userQuestion: string, ctx: LlmS
       body: JSON.stringify({
         model: config.model,
         messages: [
-          { role: 'system', content: buildSystemPrompt() },
+          { role: 'system', content: buildSystemPrompt(config.advisorMode) },
           {
             role: 'user',
             content:

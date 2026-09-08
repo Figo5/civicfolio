@@ -619,3 +619,32 @@ test('quotes: marks tagged by source, unresolvable symbols reported not invented
   assert.equal(junk.body.failed.length, 2, 'every rejected symbol is explained');
   assert.match(junk.body.failed[0].reason, /not a valid ticker/);
 });
+
+test('advisor mode is server-controlled and shapes the prompt', async () => {
+  const { getLlmConfig, buildSystemPrompt } = await import('../src/llm.js');
+
+  // Default posture declines directive calls.
+  delete process.env['CIVICFOLIO_ADVISOR_MODE'];
+  assert.equal(getLlmConfig().advisorMode, 'analyst');
+  const analyst = buildSystemPrompt('analyst');
+  assert.match(analyst, /Do NOT issue directive verdicts/);
+
+  // Owner opts in to direct recommendations.
+  process.env['CIVICFOLIO_ADVISOR_MODE'] = 'advisor';
+  assert.equal(getLlmConfig().advisorMode, 'advisor');
+  const advisor = buildSystemPrompt('advisor');
+  assert.match(advisor, /direct, actionable assessment/);
+  assert.match(advisor, /conviction level/);
+  // Even in advisor mode, fabricated precision stays off the table.
+  assert.match(advisor, /No fabricated price targets/);
+  assert.doesNotMatch(advisor, /Do NOT issue directive verdicts/);
+
+  // An unrecognised value falls back to the safer posture rather than advisor.
+  process.env['CIVICFOLIO_ADVISOR_MODE'] = 'yolo';
+  assert.equal(getLlmConfig().advisorMode, 'analyst');
+  delete process.env['CIVICFOLIO_ADVISOR_MODE'];
+
+  // The browser cannot flip it: settings only reports the mode.
+  const s = await agent().get('/api/settings');
+  assert.equal(s.body.providers.llm_endpoint.advisor_mode, 'analyst');
+});

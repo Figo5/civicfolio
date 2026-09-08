@@ -167,14 +167,26 @@ export function createApp(): express.Express {
       // Portfolio goes to the external endpoint only when the user asks for it.
       const includePortfolio = body.include_portfolio === true;
       const summary = includePortfolio ? portfolioSummary(d) : undefined;
-      const ctx = buildStoreContext({ disclosures: d.disclosures }, summary && {
-        cash_usd: summary.cash_usd,
-        positions: summary.positions.map((p) => ({
+      // Refresh marks from live quotes first so an assessment reasons about
+      // current prices rather than whatever was last typed in.
+      if (summary && summary.positions.length > 0) {
+        const { quotes } = await getQuotes(summary.positions.map((p) => p.ticker));
+        if (quotes.length > 0) {
+          update((draft) => {
+            for (const q of quotes) setMark(draft, { ticker: q.ticker, price: q.price, source: 'quote', quote_source: q.source });
+            return { committed: true, value: null };
+          });
+        }
+      }
+      const fresh = includePortfolio ? portfolioSummary(load()) : undefined;
+      const ctx = buildStoreContext({ disclosures: d.disclosures }, fresh && {
+        cash_usd: fresh.cash_usd,
+        positions: fresh.positions.map((p) => ({
           ticker: p.ticker, quantity: p.quantity, cost_basis_usd: p.cost_basis_usd, avg_cost: p.avg_cost,
           mark_price: p.mark_price, mark_source: p.mark_source, market_value_usd: p.market_value_usd,
           unrealized_pl_usd: p.unrealized_pl_usd, unrealized_pl_pct: p.unrealized_pl_pct,
         })),
-        unrealized_pl_usd: summary.unrealized_pl_usd,
+        unrealized_pl_usd: fresh.unrealized_pl_usd,
       });
       const llmRes = await callLlm(cfg, question, ctx);
       if (!llmRes.ok) return fail(res, 502, llmRes.error ?? 'LLM request failed');
@@ -388,6 +400,10 @@ export function createApp(): express.Express {
           status: llm.enabled ? 'configured' : 'not_configured',
           has_key: llm.hasKey,
           model_when_configured: llm.enabled ? llm.model : undefined,
+          advisor_mode: llm.advisorMode,
+          advisor_mode_note: llm.advisorMode === 'advisor'
+            ? 'Advisor mode: gives direct recommendations with conviction and sizing. Set by you in server env.'
+            : 'Analyst mode (default): lays out considerations without directive buy/sell calls. Set CIVICFOLIO_ADVISOR_MODE=advisor to change.',
           base_url_when_configured: llm.enabled ? llm.baseUrl : undefined,
           note: llm.enabled
             ? 'OpenAI-compatible endpoint configured via server env. Key never exposed to the frontend. Only a minimized disclosure summary is sent (never your ideas, watchlist, trades, or portfolio); content is delimited as untrusted data and citations are limited to records actually present in the context.'

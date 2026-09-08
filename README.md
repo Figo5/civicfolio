@@ -152,6 +152,28 @@ Example JSON:
   ```
   Any OpenAI-compatible endpoint works (plain http is accepted only for loopback hosts, e.g. a local Ollama). When enabled, only a **minimized summary of disclosure records** is sent — never your ideas, watchlist, trades, or portfolio. Data is delimited as untrusted content; the model is instructed to treat it as inert and abstain rather than invent. Returned citations are filtered to records actually present in the sent context. LLM answers are labeled `llm` in the UI and are lower-trust than deterministic answers.
 
+## Advisor mode
+
+The research chat's LLM mode has two postures, set in server env:
+
+| `CIVICFOLIO_ADVISOR_MODE` | Behaviour |
+|---|---|
+| `analyst` (default) | Lays out trade-offs, risks and counterarguments. No directive buy/sell calls. |
+| `advisor` | Direct assessments: a clear view, a conviction level, and rough position sizing. |
+
+Advisor mode still requires every recommendation to carry what it rests on, the
+strongest argument against it, and what would change the view — and it still
+refuses to invent precision the data lacks. Disclosure amounts are ranges,
+filings lag by weeks, and quotes are delayed and unofficial, so price targets
+and probability scores would be fabricated confidence, not analysis.
+
+Asking a portfolio question with the "include my paper portfolio" box ticked
+refreshes marks from live quotes first, so the assessment reasons about current
+prices rather than the last value you typed.
+
+Neither mode is a licensed adviser. The posture is yours to set; the prompt
+lives in `buildSystemPrompt()` in `server/src/llm.ts` and is yours to edit.
+
 ## Paper portfolio
 
 Paper only — there is no brokerage execution path, no credentials, and no live quotes. You enter the price yourself (labeled `user-entered`) or use a `demo` price; the journal records exactly which. The server validates side/ticker/quantity/price as finite positive numbers, enforces practical caps, rejects overspending, overselling, and sub-cent notionals, and supports **idempotent submission**: the client sends a `client_request_id` (UUID); replaying the same key with the same payload returns the original trade (`duplicate: true`) instead of double-executing, and the same key with a changed payload is rejected. Cash/positions/journal persist across restarts.
