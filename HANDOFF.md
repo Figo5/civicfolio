@@ -83,3 +83,45 @@ Independent re-verification, then one defect fixed.
 This also closes the "DELETE endpoints have no UI" gap listed above.
 
 **Still open:** no git commit (repo has zero commits, everything untracked); chat history clears only via demo reset; no CI. Robinhood and live disclosures remain intentionally unconfigured.
+
+## Session 2 (Claude, 2026-09-08) — real data, marks, always-on
+
+**Mark prices.** Positions now take a price you type in, and the app derives
+market value and unrealized gain/loss from it. Unmarked positions stay `null`
+rather than defaulting to cost basis, so nothing implies a value you did not
+set. `POST /api/portfolio/marks`; `null` clears. Never a quote — no market data
+source exists in this app.
+
+**Reset backups.** `demo/load` and `demo/clear` copy the store aside first
+(`~/.civicfolio/backup-<ts>-<reason>.json`, 10 most recent kept). Best-effort:
+a backup failure never blocks the reset.
+
+**Real disclosure data.** `scripts/fetch-disclosures.mjs` pulls congressional
+trades and converts them to the import schema, optionally posting through the
+normal validated endpoint. 74 real records are loaded; the demo dataset was
+cleared (backup written first). Provenance: lambdafin.com parses House Clerk
+PTRs, and every row keeps `ptrLink` — the official House PDF — as `source_url`,
+surfaced as a clickable link in the record detail view.
+
+Rows that cannot be represented honestly are skipped, never guessed: no ticker,
+unclassifiable type, or a truncated amount range like `"$100,001 -"`. A 90-day
+pull gave 75 importable of 100; the server's dedupe then caught 1 duplicate.
+
+**Why not the official bulk file:** `2025FD.zip` is a filing index only (2,918
+rows, 515 PTRs) with no tickers or amounts. 8 of 8 sampled PTR PDFs had zero
+extractable text — they are scans. Ticker-level data from the primary source
+would require OCR. The site's statutory use notice is quoted in the README.
+
+**Always-on.** `~/Library/LaunchAgents/local.civicfolio.plist` starts the server
+at login with `KeepAlive`. Verified: killed the process, it came back in ~5s
+with data intact.
+
+**Verification:** 34/34 tests, typecheck, build, and smoke all pass. Pushed to
+the private repo github.com/Figo5/civicfolio.
+
+**Gaps:** Hermes could not be used for implementation this session — it is
+pinned to `gpt-5.6-luna` through a Codex subscription that returns HTTP 429
+(usage limit reached), with no fallback API keys configured. The upstream trade
+API caps responses at 100 rows regardless of `--days`, so historical backfill
+beyond that needs pagination or a different source. Senate filings are not
+covered by the current feed. Chat history still clears only via reset.

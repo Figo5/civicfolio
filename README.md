@@ -18,6 +18,21 @@ Development mode (hot reload, API proxied same-origin):
 npm run dev          # vite on http://127.0.0.1:5173 proxying /api to 8787
 ```
 
+## Always-on (macOS launch agent)
+
+The app runs as a login-time launch agent, so `http://127.0.0.1:8787` is always
+there without a terminal open. It restarts itself if it exits.
+
+```bash
+launchctl load ~/Library/LaunchAgents/local.civicfolio.plist     # enable
+launchctl unload ~/Library/LaunchAgents/local.civicfolio.plist   # disable
+tail -f ~/.civicfolio/server.log                                  # logs
+```
+
+The plist runs `npm start` in this directory. After changing frontend code, run
+`npm run build` — the server serves `dist/` from disk, so a browser refresh picks
+it up without restarting anything.
+
 ## Commands
 
 | Command | What it does |
