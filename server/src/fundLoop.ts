@@ -14,7 +14,7 @@ import { getQuotes } from './quotes.js';
 import { getMovers, getPriceHistory, getTickerNews } from './market.js';
 import { getFundamentals } from './fundamentals.js';
 import { runResearchAgent, getAgentConfig } from './ollamaAgent.js';
-import { planTradeFromVerdict, executeAiTrade, fundEquity, lessonsBlock, type PlannedTrade } from './aiFund.js';
+import { planTradeFromVerdict, executeAiTrade, fundEquity, lessonsBlock, daysSince, lastSellOf, MIN_HOLD_DAYS, REBUY_COOLDOWN_DAYS, type PlannedTrade } from './aiFund.js';
 import { update, load } from './store.js';
 
 const MAX_OPEN_POSITIONS = 6;
@@ -50,6 +50,7 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
     if (!q) { actions.push({ ticker, action: 'skip', detail: 'no quote available' }); continue; }
     const pos = before.ai_fund.positions[ticker];
     const stop = before.ai_fund.stops[ticker];
+    const d = before; // snapshot for age/cooldown checks
 
     // Hard stop: deterministic, no model involved.
     if (typeof stop === 'number' && q.price <= stop) {
@@ -63,6 +64,14 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
     }
 
     // Thesis re-check with the model: hold, or exit?
+    // Min-hold guard: hourly runs re-research positions, and a single noisy
+    // dip can flip a fresh thesis — block thesis-exits for MIN_HOLD_DAYS after
+    // entry. The hard stop above always fires regardless.
+    const entryTrade = [...d.ai_fund.trades].reverse().find((t) => t.side === 'buy' && t.ticker === ticker);
+    if (entryTrade && daysSince(entryTrade.executed_at) < MIN_HOLD_DAYS) {
+      actions.push({ ticker, action: 'hold', detail: `min-hold (${daysSince(entryTrade.executed_at).toFixed(1)}d old, ${MIN_HOLD_DAYS}d required)` });
+      continue;
+    }
     const verdictRes = await researchOne(ticker, lessons);
     if (!verdictRes.ok) { actions.push({ ticker, action: 'skip', detail: verdictRes.error }); continue; }
     if (verdictRes.outcome.verdict === 'avoid') {
@@ -91,6 +100,12 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
       actions.push({ ticker: candidate, action: 'skip', detail: verdictRes.error });
     } else {
       const v = verdictRes.outcome;
+      // Re-entry cooldown: don't chase back into a name we just sold — the
+      // classic whipsaw under frequent runs.
+      const lastSell = lastSellOf(afterHolds, candidate);
+      if (lastSell && daysSince(lastSell) < REBUY_COOLDOWN_DAYS) {
+        actions.push({ ticker: candidate, action: 'no-trade', detail: `re-entry cooldown (${daysSince(lastSell).toFixed(1)}d since last sell, ${REBUY_COOLDOWN_DAYS}d required)` });
+      } else {
       const { quotes } = await getQuotes([candidate]);
       const q = quotes[0];
       if (!q) {
@@ -116,6 +131,7 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
           });
           actions.push({ ticker: candidate, action: 'buy', detail: `${planned.plan.quantity} @ ${q.price} (stop ${planned.plan.stop_loss ?? '—'}): ${v.summary.slice(0, 100)}` });
         }
+      }
       }
     }
   }

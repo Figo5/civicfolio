@@ -19,6 +19,21 @@ export const FUND_START_USD = 10_000;
 export const MAX_POSITION_PCT = 0.2; // single name <= 20% of fund equity
 export const MAX_OPEN_POSITIONS = 6;
 export const RISK_PER_TRADE = 0.02; // risk 2% of equity between entry and stop
+export const MIN_HOLD_DAYS = 2; // thesis-exits blocked within 2 days of entry (stops always allowed)
+export const REBUY_COOLDOWN_DAYS = 3; // no re-buying a ticker within 3 days of selling it
+
+/** Days since an ISO timestamp (fractional). */
+export function daysSince(iso: string): number {
+  return (Date.now() - Date.parse(iso)) / 86400000;
+}
+
+/** Last time the fund sold `ticker` (for the re-entry cooldown), or null. */
+export function lastSellOf(d: AppData, ticker: string): string | null {
+  for (const t of d.ai_fund.trades) {
+    if (t.side === 'sell' && t.ticker === ticker) return t.executed_at;
+  }
+  return null;
+}
 
 /** Current equity = cash + marked positions. */
 export function fundEquity(d: AppData): number {
