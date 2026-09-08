@@ -767,3 +767,32 @@ test('trends endpoint aggregates the store', async () => {
   assert.ok(Array.isArray(proposals.body.proposals));
   assert.ok(proposals.body.notes.length >= 3, 'limitations stated on the payload');
 });
+
+test('model failover: ranks candidates and recognises unavailable models', async () => {
+  const { rankModels, isModelUnavailable } = await import('../src/ollamaAgent.js');
+
+  // Explicit config wins outright.
+  assert.deepEqual(rankModels(['a:cloud', 'b'], 'pinned:model'), ['pinned:model']);
+  assert.deepEqual(rankModels(['a:cloud', 'b'], '   '), ['a:cloud', 'b']);
+
+  // Cloud first (stronger), local after (never rate-limited) — so a cloud
+  // limit falls back to something that still answers.
+  assert.deepEqual(
+    rankModels(['gemma4:e2b', 'gpt-oss:120b-cloud', 'glm-5.3-flash:cloud']),
+    ['gpt-oss:120b-cloud', 'glm-5.3-flash:cloud', 'gemma4:e2b'],
+  );
+  assert.deepEqual(rankModels([]), []);
+
+  // Errors that mean "try the next model" rather than "give up".
+  for (const e of [
+    'you (gio5) have reached your session usage limit, upgrade for higher limits',
+    'Unauthorized',
+    'model not found',
+    'quota exceeded',
+  ]) assert.equal(isModelUnavailable(e), true, e);
+
+  // A genuine fault must NOT be mistaken for an unavailable model.
+  for (const e of ['agent request timed out', 'connection refused', 'invalid json']) {
+    assert.equal(isModelUnavailable(e), false, e);
+  }
+});
