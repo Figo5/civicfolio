@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea, type DataSourceStatus } from '../api';
-import { TrackRecord } from './TrackRecord';
 import { AiFund } from './AiFund';
 
 const MOVER_TABS = [
@@ -294,19 +293,6 @@ function Insights({ onOpen }: { onOpen: (t: string) => void }) {
             </>
           )}
 
-          {board.earnings_soon.length > 0 && (
-            <>
-              <p className="card-title sub">Reporting within two weeks</p>
-              <div className="chips">
-                {board.earnings_soon.map((i) => (
-                  <button key={i.ticker} className="chip" type="button" onClick={() => onOpen(i.ticker)}>
-                    {i.ticker} <span className="muted">{i.earnings_in_days}d</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-
           <p className="provenance">{board.notes.join(' ')}</p>
         </>
       )}
@@ -410,7 +396,6 @@ export function OnePage() {
       </div>
 
       <AiFund onOpen={openTicker} />
-      <TrackRecord onOpen={openTicker} />
 
     </div>
   );
