@@ -1,5 +1,4 @@
-import type { AppData, DisclosureRecord, WatchlistItem, TrackedIdea, PaperTrade, PortfolioState, ChatMessage } from './types.js';
-import { DEMO_DISCLOSURES, DEMO_WATCHLIST, DEMO_IDEAS, DEMO_TRADES } from './seedData.js';
+import type { AppData, WatchlistItem, TrackedIdea, PaperTrade, PortfolioState, ChatMessage } from './types.js';
 import { isFiniteNumber } from './validate.js';
 
 import fs from 'node:fs';
@@ -25,36 +24,14 @@ export function emptyPortfolio(): PortfolioState {
 // Demo cash reconciles with the seeded trades (425 + 140.5 = 565.50 spent).
 export const DEMO_SEED_SPEND = 425 + 140.5;
 
-export function demoData(): AppData {
-  return {
-    disclosures: structuredClone(DEMO_DISCLOSURES),
-    watchlist: structuredClone(DEMO_WATCHLIST),
-    ideas: structuredClone(DEMO_IDEAS),
-    trades: structuredClone(DEMO_TRADES),
-    portfolio: {
-      cash_usd: Math.round((100000 - DEMO_SEED_SPEND) * 100) / 100,
-      positions: { ARRX: { quantity: 10, cost_basis_usd: 425 }, CYPW: { quantity: 5, cost_basis_usd: 140.5 } },
-      // Present so in-memory demo state matches what a disk round-trip returns.
-      marks: {},
-    },
-    chat: [],
-    meta: {
-      seed_version: 1,
-      demo_loaded_at: new Date().toISOString(),
-      imports: [],
-    },
-  };
-}
-
 export function emptyData(): AppData {
   return {
-    disclosures: [],
     watchlist: [],
     ideas: [],
     trades: [],
     portfolio: emptyPortfolio(),
     chat: [],
-    meta: { seed_version: 1, demo_loaded_at: null, imports: [] },
+    meta: { schema_version: 2 },
   };
 }
 
@@ -108,7 +85,6 @@ export function load(): AppData {
       const parsed = JSON.parse(raw) as Partial<AppData>;
       const base = emptyData();
       const data: AppData = {
-        disclosures: Array.isArray(parsed.disclosures) ? (parsed.disclosures as DisclosureRecord[]) : base.disclosures,
         watchlist: Array.isArray(parsed.watchlist) ? (parsed.watchlist as WatchlistItem[]) : base.watchlist,
         ideas: Array.isArray(parsed.ideas) ? (parsed.ideas as TrackedIdea[]) : base.ideas,
         trades: Array.isArray(parsed.trades) ? (parsed.trades as PaperTrade[]) : base.trades,
@@ -198,13 +174,6 @@ function pruneBackups(): void {
   } catch { /* pruning is best-effort */ }
 }
 
-export function resetDemo(): AppData {
-  backupBeforeReset('before-demo-load');
-  const data = demoData();
-  save(data);
-  return data;
-}
-
 export function resetEmpty(): AppData {
   backupBeforeReset('before-clear');
   const data = emptyData();
@@ -212,9 +181,3 @@ export function resetEmpty(): AppData {
   return data;
 }
 
-export function addImportToMeta(filename: string, count: number): void {
-  update((draft) => {
-    draft.meta.imports.push({ filename: path.basename(filename), imported_at: new Date().toISOString(), count });
-    return { committed: true, value: undefined as void };
-  });
-}

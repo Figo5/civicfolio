@@ -1,15 +1,13 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import { load, update, save, resetDemo, resetEmpty, dataDir } from './store.js';
+import { load, update, save, resetEmpty, dataDir } from './store.js';
 import { answerQuestion } from './research.js';
 import { submitTrade, setMark, addIdea, addWatchlistItem, removeIdea, removeWatchlistItem, portfolioSummary } from './portfolio.js';
-import { runImport, dedupeRecords } from './importAdapter.js';
 import { getLlmConfig, callLlm, buildStoreContext } from './llm.js';
 import { getQuotes } from './quotes.js';
 import { getMovers, getPriceHistory, getTickerNews, type MoverKind } from './market.js';
 import { getFundamentals } from './fundamentals.js';
-import { buildProposals, buildTrends } from './proposals.js';
 import { runResearchAgent, getAgentConfig, verifyLevels } from './ollamaAgent.js';
 import { cleanText } from './validate.js';
 import type { AppData, ChatMessage } from './types.js';
@@ -80,74 +78,21 @@ export function createApp(): express.Express {
   app.get('/api/meta', (_req, res) => {
     const d = data();
     res.json({
-      data_modes_present: [...new Set(d.disclosures.map((r) => r.data_mode))],
       counts: {
-        disclosures_total: d.disclosures.length,
-        disclosures_demo: d.disclosures.filter((r) => r.data_mode === 'demo').length,
-        disclosures_imported: d.disclosures.filter((r) => r.data_mode !== 'demo').length,
         watchlist: d.watchlist.length,
         ideas: d.ideas.length,
         trades: d.trades.length,
+        positions: Object.keys(d.portfolio.positions).length,
         chat_messages: d.chat.length,
       },
-      demo_loaded_at: d.meta.demo_loaded_at,
-      imports: d.meta.imports,
       data_dir: dataDir(),
-      llm_mode_available: getLlmConfig().enabled,
+      agent: getAgentConfig(),
+      market_source: 'Live exchange data via a public endpoint; each quote reports its own delay.',
       robinhood: { status: 'not_configured', note: 'Brokerage execution is disabled. No credentials are read or stored.' },
     });
   });
 
   // ---- disclosures ----
-  app.get('/api/disclosures', (req, res) => {
-    const d = data();
-    const rows = [...d.disclosures];
-    const str = (v: unknown): string | undefined =>
-      typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
-
-    let out = rows;
-    const ticker = str(req.query.ticker)?.toUpperCase();
-    if (ticker) out = out.filter((r) => r.ticker === ticker);
-
-    const owner = str(req.query.owner);
-    if (owner) out = out.filter((r) => r.owner.toLowerCase().includes(owner.toLowerCase()));
-
-    const txType = str(req.query.tx_type)?.toLowerCase();
-    if (txType && ['purchase', 'sale', 'exchange'].includes(txType)) {
-      out = out.filter((r) => r.tx_type === txType);
-    }
-
-    const chamber = str(req.query.chamber);
-    if (chamber === 'senate') out = out.filter((r) => r.owner_role.includes('Senator'));
-    if (chamber === 'house') out = out.filter((r) => r.owner_role.includes('House'));
-
-    const mode = str(req.query.data_mode);
-    if (mode && ['demo', 'imported', 'live'].includes(mode)) {
-      out = out.filter((r) => r.data_mode === mode);
-    }
-
-    const amendment = str(req.query.amendment);
-    if (amendment === 'true') out = out.filter((r) => r.amendment === true);
-    if (amendment === 'false') out = out.filter((r) => r.amendment === false);
-
-    const from = str(req.query.published_from);
-    if (from && /^\d{4}-\d{2}-\d{2}$/.test(from)) out = out.filter((r) => r.published_date >= from);
-    const to = str(req.query.published_to);
-    if (to && /^\d{4}-\d{2}-\d{2}$/.test(to)) out = out.filter((r) => r.published_date <= to);
-
-    const ft = str(req.query.q)?.toLowerCase();
-    if (ft) {
-      out = out.filter((r) =>
-        [r.ticker, r.company, r.owner, r.owner_role, r.notes ?? ''].join(' ').toLowerCase().includes(ft),
-      );
-    }
-
-    res.json({
-      data_mode_present: [...new Set(out.map((r) => r.data_mode))],
-      count: out.length,
-      records: out,
-    });
-  });
 
   // Company fundamentals from SEC EDGAR XBRL (official, keyless, filed data).
   // Failures are reasons, never invented figures. Cached 24h per CIK.
@@ -161,14 +106,8 @@ export function createApp(): express.Express {
 
   // Stock proposals: transparent heuristic over stored disclosures. Buy-side
   // only; every proposal carries reasons, counterpoints, and record citations.
-  app.get('/api/proposals', async (_req, res) => {
-    res.json(await buildProposals(data()));
-  });
 
   // What's trending across the stored window: most bought/sold, by volume, top filers.
-  app.get('/api/trends', (_req, res) => {
-    res.json(buildTrends(data()));
-  });
 
   // Deep research on one ticker: Ollama Cloud agent with web_search tool.
   // Results cached ~6h per ticker; verdicts labeled with model + timestamp.
@@ -341,7 +280,7 @@ export function createApp(): express.Express {
         }
       }
       const fresh = includePortfolio ? portfolioSummary(load()) : undefined;
-      const ctx = buildStoreContext({ disclosures: d.disclosures }, fresh && {
+      const ctx = buildStoreContext({ disclosures: [] }, fresh && {
         cash_usd: fresh.cash_usd,
         positions: fresh.positions.map((p) => ({
           ticker: p.ticker, quantity: p.quantity, cost_basis_usd: p.cost_basis_usd, avg_cost: p.avg_cost,
@@ -367,7 +306,7 @@ export function createApp(): express.Express {
       return res.json({ message: msg });
     }
 
-    const ans = answerQuestion(question, d);
+    const ans = await answerQuestion(question, d);
     const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString() };
     const msg: ChatMessage = { role: 'assistant', content: ans.content, citations: ans.citations, mode: 'deterministic', ts: new Date().toISOString() };
     update((draft) => {
@@ -497,58 +436,8 @@ export function createApp(): express.Express {
   });
 
   // ---- import ----
-  app.post('/api/disclosures/import', (req, res) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const text = body.text;
-    if (typeof text !== 'string' || text.length === 0) return fail(res, 400, 'text field with file content is required');
-    if (Buffer.byteLength(text, 'utf8') > MAX_IMPORT_BYTES) {
-      return fail(res, 413, `import too large (max ${MAX_IMPORT_BYTES / 1024 / 1024}MB)`);
-    }
-    let kind: 'json' | 'csv' = 'json';
-    if (body.kind !== undefined) {
-      if (body.kind !== 'json' && body.kind !== 'csv') return fail(res, 400, 'kind must be "json" or "csv"');
-      kind = body.kind;
-    }
-    const idPrefix = 'imp-' + Date.now().toString(36);
-    const { report, records } = runImport(text, kind, idPrefix);
-    if (records.length === 0) {
-      const structural = report.errors.some((e) => e.row === 0);
-      return res.status(structural ? 400 : 207).json({ report, imported_count: 0 });
-    }
-    const outcome = update((draft) => {
-      const { unique, duplicates } = dedupeRecords(records, draft.disclosures);
-      const rowErrors = duplicates.map((r, i) => ({ row: -(i + 1), message: `duplicate skipped: ${r.ticker} ${r.owner} ${r.tx_date_min}..${r.tx_date_max}` }));
-      if (unique.length > 0) {
-        draft.disclosures.push(...unique);
-        draft.meta.imports.push({ filename: kind === 'json' ? 'pasted-json' : 'pasted-csv', imported_at: new Date().toISOString(), count: unique.length });
-      }
-      const finalReport = {
-        ...report,
-        added: unique.length,
-        skipped: report.skipped + duplicates.length,
-        errors: [...report.errors, ...rowErrors],
-        ok: report.errors.length === 0 && duplicates.length === 0 ? true : (unique.length + duplicates.length === 0),
-      };
-      return { committed: unique.length > 0, value: { finalReport, imported: unique.length } };
-    });
-    const { finalReport, imported } = outcome;
-    const structural = finalReport.errors.some((e) => e.row === 0);
-    res.status(structural ? 400 : finalReport.ok ? 200 : 207).json({ report: finalReport, imported_count: imported });
-  });
 
   // ---- demo reset controls ----
-  app.post('/api/demo/load', (_req, res) => {
-    const d = resetDemo();
-    res.json({
-      ok: true,
-      counts: {
-        disclosures: d.disclosures.length,
-        watchlist: d.watchlist.length,
-        ideas: d.ideas.length,
-        trades: d.trades.length,
-      },
-    });
-  });
 
   app.post('/api/demo/clear', (_req, res) => {
     resetEmpty();
@@ -558,13 +447,7 @@ export function createApp(): express.Express {
   // ---- settings (no secrets) ----
   app.get('/api/settings', (_req, res) => {
     const llm = getLlmConfig();
-    const d = data();
     res.json({
-      data_mode: d.disclosures.some((r) => r.data_mode === 'demo')
-        ? 'demo'
-        : d.disclosures.some((r) => r.data_mode !== 'demo')
-          ? 'imported'
-          : 'empty',
       providers: {
         deterministic_engine: {
           status: 'configured',
@@ -584,7 +467,7 @@ export function createApp(): express.Express {
             : 'Set OPENAI_API_KEY (and optionally OPENAI_BASE_URL / OPENAI_MODEL) in server env to enable. Never in browser storage.',
         },
       },
-      data: { dir: dataDir(), demo_loaded_at: d.meta.demo_loaded_at, imports: d.meta.imports },
+      data: { dir: dataDir() },
       robinhood: {
         status: 'not_configured',
         note: 'Robinhood Agentic MCP is a possible future connector. Brokerage execution remains disabled; no credentials are read or stored.',

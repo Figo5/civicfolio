@@ -1,39 +1,9 @@
 // Thin typed API client for the local backend.
 
-export interface DisclosureRecord {
-  id: string;
-  ticker: string;
-  company: string;
-  owner: string;
-  owner_role: string;
-  tx_type: 'purchase' | 'sale' | 'exchange';
-  tx_date_min: string;
-  tx_date_max: string;
-  published_date: string;
-  amount_min_usd: number;
-  amount_max_usd: number;
-  amendment: boolean;
-  amendment_of?: string;
-  source_name: string;
-  source_url: string | null;
-  data_mode: 'demo' | 'imported' | 'live';
-  notes?: string;
-}
-
 export interface Meta {
-  data_modes_present: string[];
-  counts: {
-    disclosures_total: number;
-    disclosures_demo: number;
-    disclosures_imported: number;
-    watchlist: number;
-    ideas: number;
-    trades: number;
-    chat_messages: number;
-  };
-  demo_loaded_at: string | null;
+  counts: { watchlist: number; ideas: number; trades: number; positions: number; chat_messages: number };
   data_dir: string;
-  llm_mode_available: boolean;
+  market_source: string;
   robinhood: { status: string; note: string };
 }
 
@@ -55,40 +25,6 @@ export interface Fundamentals {
   source_url: string; note: string;
 }
 
-export interface Proposal {
-  ticker: string; company: string; score: number; buys: number; sells: number;
-  buy_owners: string[]; sell_owners: string[];
-  total_min_usd: number; total_max_usd: number; total_range_label: string;
-  latest_tx: string; latest_published: string; days_since_published: number;
-  reasons: string[]; counterpoints: string[];
-  record_ids: string[]; source_urls: (string | null)[]; data_modes: string[];
-  quote: { price: number; previous_close: number | null; as_of: string; source: string } | null;
-}
-
-export interface ProposalsResponse {
-  generated_at: string; window_days: number; proposals: Proposal[]; notes: string[];
-}
-
-export interface AgentVerdict {
-  ticker: string;
-  verdict: 'strong_buy' | 'buy' | 'hold' | 'avoid' | 'unclear';
-  confidence: 'low' | 'medium' | 'high';
-  summary: string;
-  reasoning: string[];
-  risks: string[];
-  sources: { title: string; url: string }[];
-  model: string;
-  searches_used: number;
-  generated_at: string;
-}
-
-export interface Trends {
-  generated_at: string; window_days: number;
-  most_bought: { ticker: string; company: string; buyers: number; trades: number; total_max_usd: number }[];
-  most_sold: { ticker: string; company: string; sellers: number; trades: number; total_max_usd: number }[];
-  by_volume: { ticker: string; company: string; trades: number; total_max_usd: number }[];
-  top_filers: { owner: string; trades: number; tickers: number }[];
-}
 
 export interface ChatCitation { record_id?: string; source_url?: string | null; source_name?: string }
 export interface ChatMessage {
@@ -156,18 +92,10 @@ function del<T>(url: string): Promise<T> {
 export const api = {
   meta: () => get<Meta>('/api/meta'),
   settings: () => get<SettingsResponse>('/api/settings'),
-  disclosures: (params: Record<string, string>) => {
-    const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '')).toString();
-    return get<{ data_mode_present: string[]; count: number; records: DisclosureRecord[] }>(`/api/disclosures${qs ? '?' + qs : ''}`);
-  },
   chat: () => get<{ mode_available: boolean; messages: ChatMessage[] }>('/api/chat'),
   clearChat: () => del<{ ok: boolean; removed: number }>('/api/chat'),
   fundamentals: (ticker: string) =>
     get<{ fundamentals: Fundamentals }>(`/api/fundamentals?ticker=${encodeURIComponent(ticker)}`),
-  proposals: () => get<ProposalsResponse>('/api/proposals'),
-  trends: () => get<Trends>('/api/trends'),
-  research: (ticker: string) =>
-    post<{ verdict: AgentVerdict; cached: boolean }>(`/api/research/${encodeURIComponent(ticker)}`, {}),
   ask: (question: string, mode: 'deterministic' | 'llm', includePortfolio = false) =>
     post<{ message: ChatMessage }>('/api/chat', { question, mode, include_portfolio: includePortfolio }),
   portfolio: () => get<PortfolioSummary>('/api/portfolio'),
@@ -179,12 +107,14 @@ export const api = {
       '/api/portfolio/marks/refresh', {}),
   submitTrade: (t: { ticker: string; side: 'BUY' | 'SELL'; quantity: number; price: number; price_source: string; trade_date: string; note?: string; client_request_id?: string }) =>
     post<{ trade: PaperTrade; portfolio: PortfolioSummary; duplicate?: boolean }>('/api/portfolio/trades', t),
-  importDisclosures: (text: string, kind: 'json' | 'csv') =>
-    post<{ report: { ok: boolean; added: number; skipped: number; errors: { row: number; message: string }[]; data_mode: string }; imported_count: number }>(
-      '/api/disclosures/import', { text, kind },
-    ),
-  demoLoad: () => post<{ ok: boolean; counts: Record<string, number> }>('/api/demo/load', {}),
   demoClear: () => post<{ ok: boolean }>('/api/demo/clear', {}),
+  movers: (kind: 'most_actives' | 'day_gainers' | 'day_losers', count = 15) =>
+    get<{ kind: string; count: number; movers: Mover[]; fetched_at: string; note: string }>(
+      `/api/market/movers?kind=${kind}&count=${count}`),
+  snapshot: (ticker: string) => get<TickerSnapshot>(`/api/market/ticker/${encodeURIComponent(ticker)}`),
+  research: (ticker: string) =>
+    post<{ verdict: AgentVerdict; cached: boolean }>(`/api/research/${encodeURIComponent(ticker)}`, {}),
+  watchlist: () => get<{ items: { id: string; ticker: string; thesis: string }[] }>('/api/watchlist'),
   addIdea: (ticker: string, thesis: string, company?: string) => post<{ idea: { id: string } }>('/api/ideas', { ticker, thesis, company }),
   removeIdea: (id: string) => del<{ ok: boolean }>(`/api/ideas/${encodeURIComponent(id)}`),
   addWatch: (ticker: string, thesis: string, company?: string) => post<{ item: { id: string } }>('/api/watchlist', { ticker, thesis, company }),
@@ -194,9 +124,44 @@ export const api = {
 export const fmtUsd = (n: number): string =>
   n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 
-export const fmtAmountRange = (min: number, max: number): string => {
-  const f = (v: number) => (v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1).replace(/\.0$/, '')}M` : v >= 1_000 ? `$${(v / 1_000).toFixed(0)}k` : `$${v}`);
-  return min === max ? f(min) : `${f(min)} – ${f(max)}`;
-};
-
 export const fmtDate = (iso: string): string => iso;
+
+export interface Mover {
+  ticker: string; name: string;
+  price: number | null; change: number | null; change_pct: number | null;
+  volume: number | null; avg_volume_3m: number | null; volume_vs_avg: number | null;
+  market_cap: number | null; forward_pe: number | null;
+  fifty_two_week_low: number | null; fifty_two_week_high: number | null; range_position: number | null;
+  fifty_day_change_pct: number | null; two_hundred_day_change_pct: number | null;
+  next_earnings: string | null; earnings_is_estimate: boolean;
+  exchange: string | null; delayed_by_seconds: number | null; quote_source: string | null;
+}
+
+export interface TickerSnapshot {
+  ticker: string;
+  quote: { ticker: string; price: number; previous_close: number | null; currency: string; as_of: string; exchange: string | null } | null;
+  history: { bars: number; recent_low: number | null; recent_high: number | null; sma20: number | null; sma50: number | null; last_close: number | null; pct_from_recent_high: number | null; pct_from_recent_low: number | null } | null;
+  news: { title: string; publisher: string | null; published: string | null; url: string }[];
+  sector: string | null; industry: string | null;
+  fundamentals: { company_name: string; revenue_usd: number | null; net_income_usd: number | null; diluted_eps: number | null; source_form: string | null; source_filed: string | null; source_url: string } | null;
+  fundamentals_unavailable: string | null;
+}
+
+export interface LevelCheck {
+  field: string; stated: string; value: number | null;
+  nearest_anchor: string | null; anchor_value: number | null;
+  drift_pct: number | null; grounded: boolean;
+}
+
+export interface AgentVerdict {
+  ticker: string;
+  verdict: 'strong_buy' | 'buy' | 'hold' | 'avoid' | 'unclear';
+  confidence: 'low' | 'medium' | 'high';
+  summary: string;
+  entry_zone: string | null; exit_target: string | null;
+  stop_loss: string | null; hold_horizon: string | null;
+  reasoning: string[]; risks: string[];
+  sources: { title: string; url: string; snippet?: string }[];
+  level_checks?: LevelCheck[];
+  model: string; searches_used: number; generated_at: string;
+}

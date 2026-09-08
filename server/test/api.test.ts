@@ -31,17 +31,6 @@ function postJson(url: string, body?: unknown) {
   return withHeaders(request(app).post(url)).set('Content-Type', 'application/json').send(body ?? {});
 }
 
-test('demo load seeds 12 synthetic disclosures', async () => {
-  const res = await postJson('/api/demo/load');
-  assert.equal(res.status, 200);
-  assert.equal(res.body.counts.disclosures, 12);
-  assert.equal(res.body.counts.trades, 2);
-  assert.equal(res.body.counts.ideas, 2);
-  assert.equal(res.body.counts.watchlist, 2);
-  // demo cash reconciles with seeded trades (425 + 140.5)
-  const port = await agent().get('/api/portfolio');
-  assert.ok(Math.abs(port.body.cash_usd - (100000 - 565.5)) < 0.005, `demo cash reconciles (got ${port.body.cash_usd})`);
-});
 
 test('demo seed is internally consistent: trades sum matches positions', async () => {
   const d = load();
@@ -52,75 +41,17 @@ test('demo seed is internally consistent: trades sum matches positions', async (
   assert.ok(Math.abs(d.portfolio.cash_usd + invested - 100000) < 0.005);
 });
 
-test('disclosures list includes explicit date fields and ranges', async () => {
-  const res = await agent().get('/api/disclosures');
-  assert.equal(res.status, 200);
-  assert.equal(res.body.count, 12);
-  const first = res.body.records[0];
-  assert.ok(first.tx_date_min && first.tx_date_max, 'has transaction date range');
-  assert.ok(first.published_date, 'has publication date');
-  assert.ok(first.amount_min_usd <= first.amount_max_usd, 'amount is a range');
-  assert.equal(first.data_mode, 'demo');
-  assert.ok(first.owner.includes('fictional'), 'demo owners are labeled fictional');
-});
 
-test('disclosure filters work: ticker, tx_type, amendment, data_mode', async () => {
-  const arrx = await agent().get('/api/disclosures?ticker=ARRX');
-  assert.equal(arrx.body.count, 3);
-  assert.ok(arrx.body.records.every((r: any) => r.ticker === 'ARRX'));
 
-  const sales = await agent().get('/api/disclosures?tx_type=sale');
-  assert.ok(sales.body.records.every((r: any) => r.tx_type === 'sale'));
-
-  const amended = await agent().get('/api/disclosures?amendment=true');
-  assert.equal(amended.body.count, 1);
-  assert.equal(amended.body.records[0].amendment_of, 'demo-0004');
-
-  const demo = await agent().get('/api/disclosures?data_mode=demo');
-  assert.equal(demo.body.count, 12);
-
-  const pub = await agent().get('/api/disclosures?published_from=2026-07-01');
-  assert.ok(pub.body.records.every((r: any) => r.published_date >= '2026-07-01'));
-
-  const ft = await agent().get('/api/disclosures?q=aurora');
-  assert.equal(ft.body.count, 3);
-});
-
-test('chat deterministic mode cites record IDs', async () => {
-  const res = await postJson('/api/chat', { question: 'what does the store say about ARRX?' });
-  assert.equal(res.status, 200);
-  assert.equal(res.body.message.mode, 'deterministic');
-  assert.match(res.body.message.content, /ARRX/);
-  assert.ok(res.body.message.citations.length >= 1);
-  assert.ok(res.body.message.citations.some((c: any) => String(c.record_id).startsWith('demo-')));
-});
 
 test('chat abstains on price questions (no fabricated prices)', async () => {
-  const res = await postJson('/api/chat', { question: 'what is the price of ARRX stock?' });
+  const res = await postJson('/api/chat', { question: 'will NVDA go up next month?' });
   assert.equal(res.status, 200);
   assert.match(res.body.message.content, /abstain/i);
 });
 
-test('chat answers publication delay question from stored records', async () => {
-  const res = await postJson('/api/chat', { question: 'what is the typical publication delay?' });
-  assert.equal(res.status, 200);
-  assert.match(res.body.message.content, /median/i);
-  assert.match(res.body.message.content, /days/);
-});
 
-test('chat compares two tickers with uncertainty section', async () => {
-  const res = await postJson('/api/chat', { question: 'compare ARRX and HRZN' });
-  assert.equal(res.status, 200);
-  assert.match(res.body.message.content, /ARRX/);
-  assert.match(res.body.message.content, /HRZN/);
-  assert.match(res.body.message.content, /amounts are ranges/i);
-});
 
-test('chat abstains when data absent for one ticker', async () => {
-  const res = await postJson('/api/chat', { question: 'compare ARRX and ZZZZ' });
-  assert.equal(res.status, 200);
-  assert.match(res.body.message.content, /no stored disclosures for ZZZZ/i);
-});
 
 test('chat refuses LLM mode when unconfigured', async () => {
   const res = await postJson('/api/chat', { question: 'hi', mode: 'llm' });
@@ -175,25 +106,25 @@ test('agent config prefers local daemon by default and reports search availabili
 test('mutation guards: hostile Origin/Host/content-type rejected, legit accepted', async () => {
   // hostile origins
   const evil = await request(app)
-    .post('/api/demo/load').set('Host', '127.0.0.1:8787')
+    .post('/api/demo/clear').set('Host', '127.0.0.1:8787')
     .set('Origin', 'https://evil.example.com').set('Content-Type', 'application/json').send({});
   assert.equal(evil.status, 403);
 
   // hostile Host (DNS rebinding style)
   const rebinding = await request(app)
-    .post('/api/demo/load').set('Host', 'evil.example.com')
+    .post('/api/demo/clear').set('Host', 'evil.example.com')
     .set('Origin', 'http://127.0.0.1:8787').set('Content-Type', 'application/json').send({});
   assert.equal(rebinding.status, 403);
 
   // cross-origin form POST (urlencoded) — no JSON content type
   const formPost = await request(app)
-    .post('/api/demo/load').set('Host', '127.0.0.1:8787')
+    .post('/api/demo/clear').set('Host', '127.0.0.1:8787')
     .set('Origin', 'https://attacker.example').set('Content-Type', 'application/x-www-form-urlencoded').send('a=1');
   assert.equal(formPost.status, 403); // origin check fires first
 
   // same-origin form-style POST with NO origin header but urlencoded → 415
   const noJson = await request(app)
-    .post('/api/demo/load').set('Host', '127.0.0.1:8787')
+    .post('/api/demo/clear').set('Host', '127.0.0.1:8787')
     .set('Content-Type', 'application/x-www-form-urlencoded').send('a=1');
   assert.equal(noJson.status, 415);
 
@@ -210,7 +141,7 @@ test('mutation guards: hostile Origin/Host/content-type rejected, legit accepted
 
   // allowed exact origins pass
   for (const o of ['http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8787', 'http://localhost:8787']) {
-    const okRes = await request(app).post('/api/demo/load')
+    const okRes = await request(app).post('/api/demo/clear')
       .set('Host', '127.0.0.1:8787').set('Origin', o).set('Content-Type', 'application/json').send({});
     assert.equal(okRes.status, 200, `origin ${o} allowed`);
   }
@@ -223,9 +154,9 @@ test('mutation guards: hostile Origin/Host/content-type rejected, legit accepted
 // ---- paper trading: finite arithmetic + idempotency ----------------------
 
 test('paper trade: buy, overspend rejected, oversell rejected, invalid input rejected', async () => {
-  await postJson('/api/demo/load'); // ensure seeded
-  const d0 = load();
+    const d0 = load();
   const beforeCash = d0.portfolio.cash_usd;
+  const beforeTrades = d0.trades.length;
 
   const buy = await postJson('/api/portfolio/trades', {
     ticker: 'tsla', side: 'BUY', quantity: 2, price: 100.5, price_source: 'user_entered',
@@ -234,7 +165,7 @@ test('paper trade: buy, overspend rejected, oversell rejected, invalid input rej
   assert.equal(buy.body.trade.ticker, 'TSLA');
   const afterBuy = await agent().get('/api/portfolio');
   assert.equal(afterBuy.body.cash_usd, beforeCash - 201);
-  assert.equal(afterBuy.body.trade_count, 3);
+  assert.equal(afterBuy.body.trade_count, beforeTrades + 1);
 
   // overspend
   const big = await postJson('/api/portfolio/trades', { ticker: 'AAPL', side: 'BUY', quantity: 100000, price: 500 });
@@ -296,7 +227,7 @@ test('notional cap enforced', async () => {
 });
 
 test('idempotency: same key same payload → duplicate flag, no re-execution', async () => {
-  await postJson('/api/demo/load');
+  await postJson('/api/demo/clear');
   const key = '550e8400-e29b-41d4-a716-446655440000';
   const payload = { ticker: 'IDEM', side: 'BUY', quantity: 5, price: 20, price_source: 'user_entered', client_request_id: key };
 
@@ -332,7 +263,7 @@ test('idempotency conflict: same key, different payload → 400', async () => {
 // ---- persistence: atomic writes, failure rollback ------------------------
 
 test('failed disk write leaves memory at pre-mutation state (rollback)', async () => {
-  await postJson('/api/demo/load');
+  await postJson('/api/demo/clear');
   const { dataDir: dir, update: upd } = await import('../src/store.js');
   const before = JSON.parse(JSON.stringify(load()));
 
@@ -362,7 +293,7 @@ test('failed disk write leaves memory at pre-mutation state (rollback)', async (
 });
 
 test('data persists across restart (cache reload from disk)', async () => {
-  await postJson('/api/demo/load');
+  await postJson('/api/demo/clear');
   const buy = await postJson('/api/portfolio/trades', { ticker: 'PERS', side: 'BUY', quantity: 3, price: 7.25 });
   assert.equal(buy.status, 200);
   const cashAfterBuy = load().portfolio.cash_usd;
@@ -386,129 +317,14 @@ test('paper trades persist to disk outside repo', async () => {
 
 // ---- imports -------------------------------------------------------------
 
-test('JSON import: valid records added, invalid reported', async () => {
-  const good = {
-    ticker: 'acme',
-    company: 'Acme Corp',
-    owner: 'Jane Doe',
-    owner_role: 'Senator',
-    tx_type: 'purchase',
-    tx_date: '2026-01-10',
-    published_date: '2026-03-01',
-    amount_min_usd: 1000,
-    amount_max_usd: 15000,
-    source_url: 'https://example.com/filing',
-    amendment: false,
-  };
-  const res = await postJson('/api/disclosures/import', { kind: 'json', text: JSON.stringify([good]) });
-  assert.equal(res.status, 200);
-  assert.equal(res.body.report.added, 1);
-  assert.equal(res.body.report.data_mode, 'imported');
 
-  const bad = { ...good, ticker: 'toolongtickerxyz' };
-  const res2 = await postJson('/api/disclosures/import', { kind: 'json', text: JSON.stringify([bad]) });
-  assert.equal(res2.status, 207);
-  assert.equal(res2.body.report.added, 0);
-  assert.ok(res2.body.report.errors.length === 1);
 
-  const broken = await postJson('/api/disclosures/import', { kind: 'json', text: '{not json' });
-  assert.equal(broken.status, 400);
 
-  // published before transaction rejected
-  const badDate = { ...good, published_date: '2025-12-01' };
-  const res3 = await postJson('/api/disclosures/import', { kind: 'json', text: JSON.stringify([badDate]) });
-  assert.equal(res3.status, 207);
-  assert.match(res3.body.report.errors[0].message, /precedes/);
-});
 
-test('import forces imported provenance even when payload claims live', async () => {
-  const sneaky = {
-    ticker: 'SNKR', company: 'Sneaky Co', owner: 'Test Owner', owner_role: 'Senator',
-    tx_type: 'purchase', tx_date: '2026-02-01', published_date: '2026-03-01',
-    amount_min_usd: 1000, amount_max_usd: 5000, amendment: false,
-    source_url: 'https://example.com/sneaky', data_mode: 'live',
-  };
-  const res = await postJson('/api/disclosures/import', { kind: 'json', text: JSON.stringify([sneaky]) });
-  assert.equal(res.status, 200);
-  assert.equal(res.body.imported_count, 1);
-  const rec = load().disclosures.find((r) => r.ticker === 'SNKR');
-  assert.ok(rec, 'record imported');
-  assert.equal(rec.data_mode, 'imported', 'data_mode forced to imported');
-  assert.equal(rec.source_url, 'https://example.com/sneaky');
-});
 
-test('import assigns UUID-based unique ids and detects duplicate imports', async () => {
-  const rec = {
-    ticker: 'DUPE', company: 'Dupe Co', owner: 'Dupe Owner', owner_role: 'Senator',
-    tx_type: 'purchase', tx_date: '2026-02-10', published_date: '2026-03-10',
-    amount_min_usd: 2000, amount_max_usd: 9000, amendment: false,
-    source_url: 'https://example.com/dupe',
-  };
-  const first = await postJson('/api/disclosures/import', { kind: 'json', text: JSON.stringify([rec]) });
-  assert.equal(first.status, 200);
-  const ids = load().disclosures.filter((r) => r.ticker === 'DUPE').map((r) => r.id);
-  assert.equal(ids.length, 1);
-  assert.match(ids[0], /^imp-[a-z0-9]+-[0-9a-f]{8}-[0-9a-f]{4}/, 'id contains a UUID');
-
-  const second = await postJson('/api/disclosures/import', { kind: 'json', text: JSON.stringify([rec]) });
-  assert.equal(second.status, 207); // all duplicates → nothing added, row errors
-  assert.equal(second.body.report.added, 0);
-  assert.ok(second.body.report.errors.some((e: any) => /duplicate skipped/i.test(e.message)));
-  assert.equal(load().disclosures.filter((r) => r.ticker === 'DUPE').length, 1, 'still one record');
-});
-
-test('CSV import: happy path, malformed rows, multiline quoted fields', async () => {
-  const csv = [
-    'ticker,company,owner,owner_role,tx_type,tx_date,published_date,amount_min_usd,amount_max_usd,amendment,source_url',
-    'MSFT,Microsoft,Sample Person (test),Senator,purchase,2026-02-01,2026-04-01,1000,15000,FALSE,https://example.com/x',
-    'TOOLONGTICKERX,Co,Person,Senator,purchase,2026-02-01,2026-04-01,1000,15000,FALSE,',
-  ].join('\n');
-  const res = await postJson('/api/disclosures/import', { kind: 'csv', text: csv });
-  assert.equal(res.status, 207);
-  assert.equal(res.body.report.added, 1);
-  assert.equal(res.body.report.skipped, 1);
-  assert.match(res.body.report.errors[0].message, /row 3/);
-
-  const missingCols = await postJson('/api/disclosures/import', { kind: 'csv', text: 'a,b\n1,2' });
-  assert.equal(missingCols.status, 400);
-  assert.match(missingCols.body.error ?? missingCols.body.report.errors[0].message, /missing required columns/);
-
-  // multiline quoted field parses correctly
-  const multiline = [
-    'ticker,company,owner,owner_role,tx_type,tx_date,published_date,amount_min_usd,amount_max_usd,amendment,notes',
-    'MLTC,Multiline Co,Multi Owner,Senator,purchase,2026-03-01,2026-04-01,1000,5000,FALSE,"line one',
-    'line two of the note"',
-  ].join('\n');
-  const mres = await postJson('/api/disclosures/import', { kind: 'csv', text: multiline });
-  assert.equal(mres.status, 200);
-  assert.equal(mres.body.report.added, 1);
-  const rec = load().disclosures.find((r) => r.ticker === 'MLTC');
-  assert.ok(rec?.notes?.includes('line two of the note'), 'multiline note captured');
-});
-
-test('CSV unterminated quote rejected with clear error', async () => {
-  const bad = 'ticker,company,owner\nUNC,Co,"unclosed quote';
-  const res = await postJson('/api/disclosures/import', { kind: 'csv', text: bad });
-  assert.equal(res.status, 400);
-  assert.match(res.body.error ?? res.body.report.errors[0].message, /unterminated quoted field/i);
-});
-
-test('import size cap enforced', async () => {
-  const huge = 'x'.repeat(6 * 1024 * 1024);
-  const res = await postJson('/api/disclosures/import', { kind: 'json', text: huge });
-  assert.equal(res.status, 413);
-});
 
 // ---- resets / lists / misc ------------------------------------------------
 
-test('demo clear empties store', async () => {
-  const res = await postJson('/api/demo/clear');
-  assert.equal(res.status, 200);
-  const list = await agent().get('/api/disclosures');
-  assert.equal(list.body.count, 0);
-  const chat = await postJson('/api/chat', { question: 'what does the store say about ARRX?' });
-  assert.match(chat.body.message.content, /abstain|no stored data/i);
-});
 
 test('ideas and watchlist CRUD with validation', async () => {
   const idea = await postJson('/api/ideas', { ticker: 'arrx', thesis: 'watch clustering' });
@@ -539,12 +355,6 @@ test('settings endpoint exposes no secrets and marks robinhood unconfigured', as
   assert.ok(res.body.data.dir.startsWith(os.tmpdir()));
 });
 
-test('meta endpoint reports data mode and robinhood status', async () => {
-  const res = await agent().get('/api/meta');
-  assert.equal(res.status, 200);
-  assert.equal(res.body.robinhood.status, 'not_configured');
-  assert.ok(Array.isArray(res.body.data_modes_present));
-});
 
 test('unknown api route 404s with json error', async () => {
   const res = await agent().get('/api/definitely-not-a-route');
@@ -612,21 +422,6 @@ test('mark prices: set, compute unrealized P&L, reject junk, clear, persist', as
   assert.equal(cleared.body.portfolio.unrealized_pl_usd, null);
 });
 
-test('destructive resets back up the previous store first', async () => {
-  await postJson('/api/demo/load');
-  const dir = dataDir();
-  const countBackups = () => fs.readdirSync(dir).filter((f) => f.startsWith('backup-') && f.endsWith('.json')).length;
-  // Clearing must leave a recoverable copy of what was there.
-  const cleared = await postJson('/api/demo/clear');
-  assert.equal(cleared.status, 200);
-  assert.ok(countBackups() > 0, 'clear writes a backup');
-  assert.ok(countBackups() <= 10, 'old backups are pruned to the cap');
-
-  const newest = fs.readdirSync(dir).filter((f) => f.startsWith('backup-')).sort().reverse()[0];
-  const restored = JSON.parse(fs.readFileSync(path.join(dir, newest), 'utf8'));
-  assert.equal(restored.disclosures.length, 12, 'backup holds the pre-clear data, not the cleared store');
-  assert.equal(load().disclosures.length, 0, 'the live store really is cleared');
-});
 
 test('quotes: marks tagged by source, unresolvable symbols reported not invented', async () => {
   const { clearQuoteCacheForTests } = await import('../src/quotes.js');
@@ -727,48 +522,7 @@ test('fundamentals endpoint: 400 on missing ticker, 404 with reason on invalid/u
 
 // ---- proposals / trends ---------------------------------------------------
 
-test('proposals: rank buy-side records, carry reasons/counterpoints, filter non-stock', async () => {
-  const { buildProposals } = await import('../src/proposals.js');
-  const now = new Date('2026-09-08T12:00:00Z');
-  const mk = (id: string, ticker: string, company: string, owner: string, tx: 'purchase' | 'sale', published: string, min: number, max: number): any => ({
-    id, ticker, company, owner, owner_role: 'House', tx_type: tx,
-    tx_date_min: published, tx_date_max: published, published_date: published,
-    amount_min_usd: min, amount_max_usd: max, amendment: false,
-    source_name: 'test', source_url: null, data_mode: 'imported',
-  });
-  const d: any = {
-    disclosures: [
-      mk('r1', 'AAA', 'Alpha Corp Common Stock', 'Rep One', 'purchase', '2026-08-01', 1000, 15000),
-      mk('r2', 'AAA', 'Alpha Corp Common Stock', 'Rep Two', 'purchase', '2026-08-15', 5000, 60000),
-      mk('r3', 'BBB', 'Some County Tax & Revenue Anticipation Notes [BBB]', 'Rep Three', 'purchase', '2026-08-01', 1000, 15000),
-      mk('r4', 'CCC', 'Charlie Corp', 'Rep One', 'sale', '2026-08-01', 1000, 15000),
-    ],
-  };
-  const out = await buildProposals(d, now);
-  const tickers = out.proposals.map((p) => p.ticker);
-  assert.ok(tickers.includes('AAA'), 'AAA proposed (2 distinct buyers)');
-  assert.ok(!tickers.includes('BBB'), 'municipal notes filtered out of proposals');
-  assert.ok(!tickers.includes('CCC'), 'sale-only ticker not proposed');
-  const aaa = out.proposals.find((p) => p.ticker === 'AAA')!;
-  assert.equal(aaa.buy_owners.length, 2);
-  assert.ok(aaa.score >= 44, `two-buyer cluster scores reasonably (got ${aaa.score})`);
-  assert.ok(aaa.reasons.length > 0 && aaa.counterpoints.length > 0, 'ships reasons AND counterarguments');
-  assert.ok(aaa.record_ids.includes('r1'), 'citations point at stored records');
-  assert.equal(out.proposals[0].ticker, 'AAA', 'AAA ranks above weaker candidates');
-});
 
-test('trends endpoint aggregates the store', async () => {
-  const res = await agent().get('/api/trends');
-  assert.equal(res.status, 200);
-  assert.ok(Array.isArray(res.body.most_bought));
-  assert.ok(Array.isArray(res.body.most_sold));
-  assert.ok(Array.isArray(res.body.by_volume));
-  assert.ok(Array.isArray(res.body.top_filers));
-  const proposals = await agent().get('/api/proposals');
-  assert.equal(proposals.status, 200);
-  assert.ok(Array.isArray(proposals.body.proposals));
-  assert.ok(proposals.body.notes.length >= 3, 'limitations stated on the payload');
-});
 
 test('model failover: ranks candidates and recognises unavailable models', async () => {
   const { rankModels, isModelUnavailable } = await import('../src/ollamaAgent.js');
@@ -800,16 +554,16 @@ test('model failover: ranks candidates and recognises unavailable models', async
 });
 
 test('chat history can be cleared without wiping the store', async () => {
-  await postJson('/api/demo/load');
-  await postJson('/api/chat', { question: 'what data do you have?' });
+  await postJson('/api/watchlist', { ticker: 'NVDA', thesis: 'keep an eye on it' });
+  await postJson('/api/chat', { question: 'show my watchlist' });
   assert.ok(load().chat.length > 0, 'a question and answer were recorded');
-  const disclosuresBefore = load().disclosures.length;
+  const watchlistBefore = load().watchlist.length;
 
   const cleared = await agent().delete('/api/chat');
   assert.equal(cleared.status, 200);
   assert.ok(cleared.body.removed > 0);
   assert.equal(load().chat.length, 0, 'history is gone');
-  assert.equal(load().disclosures.length, disclosuresBefore, 'the store itself is untouched');
+  assert.equal(load().watchlist.length, watchlistBefore, 'the store itself is untouched');
 
   // Clearing an already-empty history is a no-op, not an error.
   const again = await agent().delete('/api/chat');

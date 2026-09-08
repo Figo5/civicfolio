@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { type DisclosureRecord, fmtUsd, fmtDate } from './api';
+
 import { useMeta, ModeBanner } from './shell';
 import { OnePage } from './pages/OnePage';
 
@@ -17,7 +17,7 @@ export default function App() {
         <SectionNav />
         <div className="sidebar-footer">
           <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>
-            {meta ? `${meta.counts.disclosures_total} filings · updated daily` : 'loading…'}
+            {meta ? `${meta.counts.watchlist} watched · live market data` : 'loading…'}
           </span>
         </div>
       </aside>
@@ -29,18 +29,11 @@ export default function App() {
   );
 }
 
-// Shared badge used by the proposals table:
-export function ModeBadge({ mode }: { mode: DisclosureRecord['data_mode'] }) {
-  const label = mode === 'demo' ? 'demo' : mode === 'imported' ? 'imported' : 'live';
-  return <span className={`badge ${mode}`}>{label}</span>;
-}
-
-export { fmtUsd, fmtDate };
 
 const SECTIONS = [
-  { id: 'proposals', label: 'Proposals' },
-  { id: 'trends', label: 'Most bought / sold' },
-  { id: 'ask', label: 'Ask about the data' },
+  { id: 'movers', label: 'Market movers' },
+  { id: 'watchlist', label: 'My watchlist' },
+  { id: 'ask', label: 'Ask' },
 ];
 
 function SectionNav() {

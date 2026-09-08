@@ -290,3 +290,46 @@ code { font-family: var(--mono); font-size: 12px; background: var(--bg-soft); pa
    unavailable, and honours the user's motion preference. */
 html { scroll-behavior: smooth; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+/* --- Market tracker ------------------------------------------------------ */
+.tabs { display: flex; gap: 4px; }
+.tab {
+  padding: 6px 14px; font-size: 13px; border-radius: 7px; cursor: pointer;
+  color: var(--text-dim); background: transparent; border: 1px solid transparent;
+}
+.tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.tab.active { color: var(--blue); background: rgba(79,143,247,0.14); border-color: rgba(79,143,247,0.35); }
+
+.table-scroll { overflow-x: auto; }
+.col-name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); }
+.row-click { cursor: pointer; }
+.row-click:hover { background: rgba(255,255,255,0.035); }
+
+.range-bar {
+  display: inline-block; width: 74px; height: 6px; border-radius: 3px;
+  background: rgba(255,255,255,0.10); overflow: hidden; vertical-align: middle;
+}
+.range-fill { display: block; height: 100%; background: var(--blue); border-radius: 3px; }
+
+.stat-row { display: flex; flex-wrap: wrap; gap: 22px; margin: 12px 0 4px; }
+.stat-row > div { display: flex; flex-direction: column; gap: 2px; }
+.stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); }
+.stat-value { font-size: 15px; font-variant-numeric: tabular-nums; color: var(--text); }
+
+.detail { border-color: rgba(79,143,247,0.35); }
+.verdict { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.verdict-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.verdict-badge {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  padding: 3px 10px; border-radius: 5px; border: 1px solid currentColor;
+}
+.verdict-summary { margin: 0 0 12px; font-size: 13.5px; line-height: 1.55; }
+
+.level-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 13px; }
+.level-label { width: 56px; color: var(--text-faint); text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; }
+.level-value { flex: 1; font-variant-numeric: tabular-nums; }
+.badge.ok { background: var(--green-soft); color: var(--green); }
+.badge.warn { background: rgba(242,114,111,0.16); color: var(--red); }
+
+.tight-list { margin: 4px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.6; color: var(--text-dim); }
+.tight-list a { color: var(--blue); }
