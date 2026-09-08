@@ -44,11 +44,8 @@ export function StatusPanel() {
   const agent = s.providers.research_agent;
   return (
     <p className="provenance" style={{ marginTop: 4 }}>
-      Research model: <b>{agent?.model ?? 'not configured'}</b>
-      {agent?.web_search ? ' · web search on' : ' · web search off (no search key)'}
-      {' · brokerage: '}
-      <b>removed</b> (research-only; local credentials deleted, provider-side grant revocation not verified)
-      {' · data: '}{s.data.dir}
+      {agent?.model ?? 'model not configured'}
+      {agent?.web_search ? ' · web search on' : ' · web search off'}
     </p>
   );
 }

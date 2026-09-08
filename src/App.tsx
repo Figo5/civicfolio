@@ -1,4 +1,4 @@
-import { useMeta, ModeBanner, StatusPanel } from './shell';
+import { useMeta, StatusPanel } from './shell';
 import { OnePage } from './pages/OnePage';
 import { ChatPanel } from './pages/ChatPanel';
 
@@ -6,7 +6,6 @@ export default function App() {
   const { meta } = useMeta();
   return (
     <div className="app-frame">
-      <ModeBanner meta={meta} />
       <div className="app">
         <main className="main">
           <OnePage />

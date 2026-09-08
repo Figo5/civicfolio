@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea, type DataSourceStatus } from '../api';
 import { TrackRecord } from './TrackRecord';
-import { ExternalProcessingNotice } from '../shell';
 
 const MOVER_TABS = [
   { kind: 'most_actives' as const, label: 'Most active' },
@@ -139,8 +138,6 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
           <button className="btn small" type="button" onClick={onClose}>Close</button>
         </div>
       </div>
-
-      <ExternalProcessingNotice />
 
       {err && <div className="error-text">{err}</div>}
       {!snap && !err && <div className="empty-state">Loading {ticker}…</div>}

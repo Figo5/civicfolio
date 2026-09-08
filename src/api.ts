@@ -11,7 +11,7 @@ export interface SettingsResponse {
   data_mode: string;
   providers: {
     deterministic_engine: { status: string; note: string };
-    research_agent?: { status: string; model: string; web_search: boolean; note: string };
+    research_agent: { status: string; model: string; web_search: boolean; note: string };
     llm_endpoint: { status: string; has_key: boolean; model_when_configured?: string; base_url_when_configured?: string; note: string };
   };
   data: { dir: string; demo_loaded_at: string | null; imports: { filename: string; imported_at: string; count: number }[] };
