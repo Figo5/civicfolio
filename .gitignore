@@ -18,3 +18,4 @@ data-local/
 # OS noise
 .DS_Store
 *.log
+.civicfolio/

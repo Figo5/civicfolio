@@ -67,9 +67,135 @@ Smoke tests run against **isolated temporary data** by default (`scripts/smoke.m
 - No CI configuration in-repo (tests/typecheck/build/smoke run locally); coordinator reviews publication separately.
 - Security scope is single-user localhost: no auth (fine on 127.0.0.1), JSON file store, no rate limiting beyond body caps.
 
+## Session 3 (GLM, 2026-09-08) — SEC fundamentals finished
+
+The untracked, half-finished `server/src/fundamentals.ts` from session 2 is now
+complete and wired in:
+
+- **Fixed** the compile error (`Property 'facts' does not exist on type 'never'`)
+  that was failing `npm run typecheck`; extracted a pure, test-exported
+  `buildTickerMap()` helper.
+- **API**: `GET /api/fundamentals?ticker=` — as-filed annual figures (revenue,
+  net/operating income, assets, liabilities, equity, diluted EPS) from SEC
+  EDGAR's official, keyless XBRL `companyfacts` API; 24h per-CIK cache; failures
+  are reasons (invalid ticker, fund/ETF with no US-GAAP facts), never figures.
+- **UI**: "Company Fundamentals" card on Overview with a ticker lookup, table of
+  filed values, and per-result provenance (form, filed date, CIK, EDGAR link).
+- **Tests**: +4 (38 total) — map parsing incl. junk, 400 missing ticker, 404
+  with reason on invalid/unknown, no fabricated fundamentals object.
+
+**Verification (actual runs this session):** `npm test` 38/38, `npm run
+typecheck` clean, `npm run build` clean, `npm run smoke` all checks passed.
+Live check of the running server: `GET /api/fundamentals?ticker=AAPL` returned
+real FY2025 10-K figures (revenue $416.16B, filed 2025-10-31, CIK 0000320193);
+missing/invalid tickers return the documented errors. Server restarted via
+launchd with the new build; http://127.0.0.1:8787 serves it.
+
+## Session 4 (GLM, 2026-09-08) — proposals, trends, auto-refresh
+
+Reoriented per owner: the app should *propose* stocks from real disclosure data,
+not just abstain. Added:
+
+- **`GET /api/proposals`** — transparent 0–100 heuristic over the 180-day
+  published window: distinct buyers × 22, +10 no disclosed sales, +8 recent
+  filing (≤14d), +8 large aggregate range, +4 five-plus records. Buy-side only;
+  every proposal ships reasons, counterarguments, filer names, and record-id /
+  PTR-PDF citations. Non-common-stock instruments (municipal notes, funds —
+  e.g. "LA Tax & Revenue Anticipation Notes" filed under GS) are filtered from
+  proposals but remain in trends.
+- **`GET /api/trends`** — most bought / most sold / largest filed volume / most
+  active filers over the same window.
+- **Proposals page** (now the landing tab): ranked table with expandable
+  reasons/counterarguments, a "Paper trade →" button per row that prefills the
+  portfolio BUY form, and the four trend tables.
+- **Daily auto-refresh**: `~/Library/LaunchAgents/local.civicfolio.refresh.plist`
+  runs `fetch-disclosures.mjs --days 90 --post` at 08:30 daily. Must use 90 days
+  — the upstream returns zero rows for shorter windows (verified live) and caps
+  at 100 rows regardless. Dedupe makes re-imports idempotent (verified: re-post
+  left the 74-record store unchanged).
+
+**Verification:** 40/40 tests (2 added: proposal ranking/filtering, trends
+shape), typecheck clean, build clean, smoke passes, live server restarted and
+serving the new build (`index-Csv4VfOk.js`, 32 live proposals over real data).
+
+**Honest framing:** the score is a heuristic over thin, delayed, range-only
+data — it is not advice, not a probability, and the page says so next to the
+data. Upstream still House-only and 100-rows-per-query.
+
+## Session 5 (GLM, 2026-09-08) — simplified to one page, paper trading removed
+
+Owner direction: no fake trading — real suggestions only, one page, take the
+idea to Robinhood. Changes:
+
+- **Removed**: Paper Portfolio (form, positions, marks, journal, demo trades),
+  Ideas/Watchlist pages, Overview, Settings page, multi-page nav. The
+  portfolio/trades/ideas/watchlist API endpoints still exist but nothing in the
+  UI uses them; demo seed no longer includes trades. Bundle: 195KB → 155KB.
+- **One page** (`src/pages/OnePage.tsx`): Proposals table (now with delayed
+  quote + day-change per row, quotes capped at top 12, missing stays "no
+  quote"), expandable row → reasons / counterarguments / **SEC EDGAR filed
+  financials fetched on expand** / filer names / PTR PDF links. Most
+  bought/sold trends. Chat embedded at the bottom (deterministic default).
+- **Proposals API now async** and enriches top proposals with quotes from the
+  existing quotes module; `total_range_label` precomputed server-side.
+- The bundled demo seed (12 synthetic disclosures) is unchanged and still
+  loadable via `/api/demo/load` for testing; the live store holds only real
+  imported filings.
+
+**Verification:** 40/40 tests, typecheck clean, build clean (155.23KB bundle),
+smoke passes, live server restarted serving `index-DfujljZO.js` with 32
+proposals — UBER $73.24, AGX $431.98, MELI $1,926.18 quoted (delayed, labeled).
+
+## Session 6 (GLM, 2026-09-08) — black/green/red theme + Ollama research agent
+
+- **Theme**: pure black (`#050505`) with white text, green (`#22c55e`) accents,
+  red/green price deltas. All navy/teal removed; score bars now monochrome.
+- **Yahoo quotes were already wired** (quotes.ts) — confirmed live on proposals
+  (UBER $73.43 etc., delayed/unofficial, labeled on the page).
+- **Research agent** (`server/src/ollamaAgent.ts`): bounded tool-loop agent.
+  Chat via the LOCAL Ollama daemon (127.0.0.1:11434, signed into Ollama Cloud,
+  model `gpt-oss:120b-cloud` — pulled and verified working); falls back to
+  https://ollama.com directly when OLLAMA_API_KEY is set. Web search uses
+  Ollama's hosted `POST /api/web_search` (requires OLLAMA_API_KEY — the local
+  daemon does NOT proxy it, verified 404). Without a key the agent runs and
+  says in its risks that it could not verify current web info.
+- **`POST /api/research/:ticker`**: 6h cache; attaches proposal + SEC
+  fundamentals as delimited untrusted context; verdict JSON (strong_buy/buy/
+  hold/avoid/unclear + confidence + reasoning + risks); sources filtered to
+  URLs actually returned by search. Server loads `~/.civicfolio/env` (gitignored)
+  at startup; env vars win over the file.
+- **Live-verified**: UBER research run returned a coherent HOLD (medium
+  confidence, 4 reasoning points, 5 risks) citing the real FY figures passed in.
+
+**To enable web search:** create a free key at https://ollama.com/settings/keys,
+put `OLLAMA_API_KEY=*** in `~/.civicfolio/env`, restart. Without it the agent
+still runs (no search).
+
+**Verification:** 42/42 tests (2 new: research endpoint guards + agent config),
+typecheck/build/smoke clean, theme verified by screenshot at 1440px.
+
+## Session 7 (GLM, 2026-09-08) — web search live, theme shipped
+
+- **OLLAMA_API_KEY configured** in `~/.civicfolio/env` (chmod 600, gitignored).
+  Direct ollama.com POST endpoints still 401 with this key (verified across
+  web_search/chat/auth variants — appears to be an account-side limitation),
+  so the working architecture is: **chat via local daemon, search via
+  DuckDuckGo Lite fallback** (keyless, bot-walled html endpoint avoided).
+- **DDG Lite parser**: protocol-relative `uddg=` redirect links decoded, titles
+  + result snippets extracted (5/search). Verified against live queries —
+  Yahoo/Barron's/WSJ results come through.
+- **Hardened agent loop**: empty-content-after-tools handled (thinking fallback,
+  tool-limit nudge, raw-text fallback verdict); parse hardened against fences/
+  thinking tags/nested braces.
+- **Live results:** UBER → BUY medium; AGX → **BUY high confidence** citing
+  dividend launch, P/E ~39.5, 51% analyst upside target; 12 sources each.
+
+**Verification:** 42/42 tests, typecheck/build/smoke clean, theme verified by
+screenshot, agent verified on two tickers end-to-end.
+
 ## Not done (per instructions)
 
-- No git commit/push (repo still untracked; coordinator handles publication).
+- No new git commit/push this session (work sessions 1–2 committed through d77a113 and pushed to the private repo; the coordinator reviews publication).
 - No external deployment, no purchases, no credential discovery, no fees.
 
 ## Takeover pass (Claude, 2026-09-08)

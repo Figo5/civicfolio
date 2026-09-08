@@ -47,6 +47,49 @@ export interface SettingsResponse {
   robinhood: { status: string; note: string };
 }
 
+export interface Fundamentals {
+  ticker: string; cik: string; company_name: string; fiscal_year_end: string | null;
+  revenue_usd: number | null; net_income_usd: number | null; operating_income_usd: number | null;
+  assets_usd: number | null; liabilities_usd: number | null; equity_usd: number | null;
+  diluted_eps: number | null; source_form: string | null; source_filed: string | null;
+  source_url: string; note: string;
+}
+
+export interface Proposal {
+  ticker: string; company: string; score: number; buys: number; sells: number;
+  buy_owners: string[]; sell_owners: string[];
+  total_min_usd: number; total_max_usd: number; total_range_label: string;
+  latest_tx: string; latest_published: string; days_since_published: number;
+  reasons: string[]; counterpoints: string[];
+  record_ids: string[]; source_urls: (string | null)[]; data_modes: string[];
+  quote: { price: number; previous_close: number | null; as_of: string; source: string } | null;
+}
+
+export interface ProposalsResponse {
+  generated_at: string; window_days: number; proposals: Proposal[]; notes: string[];
+}
+
+export interface AgentVerdict {
+  ticker: string;
+  verdict: 'strong_buy' | 'buy' | 'hold' | 'avoid' | 'unclear';
+  confidence: 'low' | 'medium' | 'high';
+  summary: string;
+  reasoning: string[];
+  risks: string[];
+  sources: { title: string; url: string }[];
+  model: string;
+  searches_used: number;
+  generated_at: string;
+}
+
+export interface Trends {
+  generated_at: string; window_days: number;
+  most_bought: { ticker: string; company: string; buyers: number; trades: number; total_max_usd: number }[];
+  most_sold: { ticker: string; company: string; sellers: number; trades: number; total_max_usd: number }[];
+  by_volume: { ticker: string; company: string; trades: number; total_max_usd: number }[];
+  top_filers: { owner: string; trades: number; tickers: number }[];
+}
+
 export interface ChatCitation { record_id?: string; source_url?: string | null; source_name?: string }
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -118,6 +161,12 @@ export const api = {
     return get<{ data_mode_present: string[]; count: number; records: DisclosureRecord[] }>(`/api/disclosures${qs ? '?' + qs : ''}`);
   },
   chat: () => get<{ mode_available: boolean; messages: ChatMessage[] }>('/api/chat'),
+  fundamentals: (ticker: string) =>
+    get<{ fundamentals: Fundamentals }>(`/api/fundamentals?ticker=${encodeURIComponent(ticker)}`),
+  proposals: () => get<ProposalsResponse>('/api/proposals'),
+  trends: () => get<Trends>('/api/trends'),
+  research: (ticker: string) =>
+    post<{ verdict: AgentVerdict; cached: boolean }>(`/api/research/${encodeURIComponent(ticker)}`, {}),
   ask: (question: string, mode: 'deterministic' | 'llm', includePortfolio = false) =>
     post<{ message: ChatMessage }>('/api/chat', { question, mode, include_portfolio: includePortfolio }),
   portfolio: () => get<PortfolioSummary>('/api/portfolio'),

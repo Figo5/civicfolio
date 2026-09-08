@@ -1,6 +1,6 @@
 # Civicfolio
 
-Personal **localhost-only** investment research app: political disclosure feed, source-cited research chat, watchlists/ideas, and a paper-trade journal. No live orders, no brokerage connection, no secrets in the browser. Demo data is unmistakably synthetic; real data comes only from files you import yourself.
+Personal **localhost-only** research tool: ranks stocks that congressional filers bought, with cited reasons, counterarguments, filed financials (SEC EDGAR), and a data-grounded chat. You take the idea and execute in your own brokerage — Civicfolio places no orders and simulates nothing.
 
 ## Quick start
 
@@ -10,7 +10,10 @@ npm run build        # type-checks and builds the frontend into dist/
 npm start            # serves API + built UI on http://127.0.0.1:8787
 ```
 
-Open **http://127.0.0.1:8787** — the first run starts with an empty store. Click **Settings → "Load demo dataset…"** (confirm by typing LOAD) to seed 12 synthetic disclosure records, sample watchlist/ideas, and two labeled demo paper trades.
+Open **http://127.0.0.1:8787** — that's the whole app: one page. Proposals at the
+top (ranked stocks, delayed price, expandable reasons + SEC filed financials +
+PTR PDF citations), most-bought/most-sold trends below, and a data-grounded chat
+at the bottom. Filings refresh automatically every morning at 08:30.
 
 Development mode (hot reload, API proxied same-origin):
 
@@ -174,6 +177,17 @@ prices rather than the last value you typed.
 Neither mode is a licensed adviser. The posture is yours to set; the prompt
 lives in `buildSystemPrompt()` in `server/src/llm.ts` and is yours to edit.
 
+## Company fundamentals (SEC EDGAR)
+
+The Overview page has a **Company Fundamentals** lookup: official, keyless,
+as-filed annual figures (revenue, net/operating income, assets, liabilities,
+equity, diluted EPS) from the SEC's XBRL `companyfacts` API — data straight from
+the source, with the declaring User-Agent and modest request rate the SEC asks
+for. Every figure carries its form (10-K) and filing date; cache is 24h per CIK.
+Failures are always reasons (unknown ticker, fund/ETF with no US-GAAP facts),
+never invented numbers. Not analyst estimates, not market prices — filings can
+be months old and restatements appear as later filings.
+
 ## Paper portfolio
 
 Paper only — there is no brokerage execution path, no credentials, and no live quotes. You enter the price yourself (labeled `user-entered`) or use a `demo` price; the journal records exactly which. The server validates side/ticker/quantity/price as finite positive numbers, enforces practical caps, rejects overspending, overselling, and sub-cent notionals, and supports **idempotent submission**: the client sends a `client_request_id` (UUID); replaying the same key with the same payload returns the original trade (`duplicate: true`) instead of double-executing, and the same key with a changed payload is rejected. Cash/positions/journal persist across restarts.
@@ -187,7 +201,7 @@ Paper only — there is no brokerage execution path, no credentials, and no live
 
 ## API overview (localhost only)
 
-GET (read-only): `/api/health`, `/api/meta`, `/api/disclosures?ticker=&owner=&tx_type=&data_mode=&amendment=&published_from=&published_to=&q=`, `/api/portfolio`, `/api/portfolio/trades`, `/api/ideas`, `/api/watchlist`, `/api/chat`, `/api/settings`
+GET (read-only): `/api/health`, `/api/meta`, `/api/disclosures?ticker=&owner=&tx_type=&data_mode=&amendment=&published_from=&published_to=&q=`, `/api/portfolio`, `/api/portfolio/trades`, `/api/ideas`, `/api/watchlist`, `/api/chat`, `/api/settings`, `/api/quotes?tickers=`, `/api/fundamentals?ticker=`
 
 POST (JSON required): `/api/chat` `{question, mode?}`, `/api/portfolio/trades` `{ticker, side, quantity, price, price_source, trade_date?, note?, client_request_id?}`, `/api/disclosures/import` `{kind, text}`, `/api/ideas` `{ticker, thesis, company?}`, `/api/watchlist` `{ticker, thesis, company?}`, `/api/demo/load`, `/api/demo/clear`
 
@@ -198,11 +212,38 @@ DELETE: `/api/ideas/:id`, `/api/watchlist/:id`
 ```
 server/src/   Express API: app.ts (routes/guards), store.ts (atomic JSON store),
               portfolio.ts, research.ts (deterministic engine), importAdapter.ts,
-              llm.ts, seedData.ts, validate.ts
+              llm.ts, fundamentals.ts (SEC EDGAR), proposals.ts (heuristic
+              screener), seedData.ts, validate.ts
 server/test/  supertest integration suite
 src/          React app (pages/, api client, shell, styles)
 scripts/      smoke.mjs — isolated end-to-end checks
 ```
+
+## Stock proposals & trends
+
+The **Proposals** tab (landing page) ranks stocks worth a look from *your stored
+disclosure data*: a transparent 0–100 heuristic (distinct filers buying dominates;
+bonuses for no disclosed sales, recent filings, larger aggregate ranges). Each
+proposal expands to show the reasons, the counterarguments, the filers, and the
+official House PTR PDFs behind it, with a one-click **Paper trade →** that
+prefills the journal. Non-stock instruments (municipal notes, funds) are excluded
+from proposals but shown in the trend tables. Trends (most bought/sold, largest
+volume, most active filers) cover the same 180-day published window.
+
+The score is a heuristic over thin, delayed, range-only filings — not advice,
+not a probability. Daily refresh: a launch agent
+(`~/Library/LaunchAgents/local.civicfolio.refresh.plist`) re-pulls the last 90
+days of filings at 08:30 and posts them through the validated import path;
+dedupe makes it idempotent.
+
+## No paper trading, no orders
+
+There is no simulated portfolio, no journal, no demo prices, and no order path
+of any kind. Civicfolio reads public filings and delayed quotes and suggests
+nothing more than "this is worth a look, here's why, here's the case against."
+Execution happens entirely in your brokerage (e.g. Robinhood); the app never
+connects to it. The import/reset endpoints remain for managing your own
+disclosure data.
 
 ## Limitations
 

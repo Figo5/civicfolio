@@ -7,6 +7,9 @@ import { submitTrade, setMark, addIdea, addWatchlistItem, removeIdea, removeWatc
 import { runImport, dedupeRecords } from './importAdapter.js';
 import { getLlmConfig, callLlm, buildStoreContext } from './llm.js';
 import { getQuotes } from './quotes.js';
+import { getFundamentals } from './fundamentals.js';
+import { buildProposals, buildTrends } from './proposals.js';
+import { runResearchAgent, getAgentConfig } from './ollamaAgent.js';
 import { cleanText } from './validate.js';
 import type { AppData, ChatMessage } from './types.js';
 
@@ -143,6 +146,69 @@ export function createApp(): express.Express {
       count: out.length,
       records: out,
     });
+  });
+
+  // Company fundamentals from SEC EDGAR XBRL (official, keyless, filed data).
+  // Failures are reasons, never invented figures. Cached 24h per CIK.
+  app.get('/api/fundamentals', async (req, res) => {
+    const raw = typeof req.query.ticker === 'string' ? req.query.ticker.trim() : '';
+    if (!raw) return fail(res, 400, 'ticker query parameter is required');
+    const result = await getFundamentals(raw);
+    if ('reason' in result) return fail(res, 404, result.reason);
+    res.json({ fundamentals: result });
+  });
+
+  // Stock proposals: transparent heuristic over stored disclosures. Buy-side
+  // only; every proposal carries reasons, counterpoints, and record citations.
+  app.get('/api/proposals', async (_req, res) => {
+    res.json(await buildProposals(data()));
+  });
+
+  // What's trending across the stored window: most bought/sold, by volume, top filers.
+  app.get('/api/trends', (_req, res) => {
+    res.json(buildTrends(data()));
+  });
+
+  // Deep research on one ticker: Ollama Cloud agent with web_search tool.
+  // Results cached ~6h per ticker; verdicts labeled with model + timestamp.
+  const researchCache = new Map<string, { at: number; verdict: unknown }>();
+  const RESEARCH_TTL = 6 * 60 * 60 * 1000;
+  app.post('/api/research/:ticker', async (req, res) => {
+    const cfg = getAgentConfig();
+    if (!cfg.enabled) {
+      return fail(res, 400, 'Research agent is disabled: set OLLAMA_API_KEY in server env to enable it.');
+    }
+    const ticker = String(req.params.ticker ?? '').trim().toUpperCase();
+    if (!/^[A-Z]{1,10}$/.test(ticker)) return fail(res, 400, 'invalid ticker');
+
+    const cached = researchCache.get(ticker);
+    if (cached && Date.now() - cached.at < RESEARCH_TTL) {
+      return res.json({ verdict: cached.verdict, cached: true });
+    }
+
+    const proposals = await buildProposals(data());
+    const proposal = proposals.proposals.find((p) => p.ticker === ticker);
+    if (!proposal) return fail(res, 404, `no stored disclosure data for ${ticker} — nothing to research`);
+
+    const fund = await getFundamentals(ticker);
+    const fundSummary = 'cik' in fund
+      ? `Revenue ${fund.revenue_usd ?? 'n/a'}, net income ${fund.net_income_usd ?? 'n/a'}, assets ${fund.assets_usd ?? 'n/a'}, equity ${fund.equity_usd ?? 'n/a'}, diluted EPS ${fund.diluted_eps ?? 'n/a'} — ${fund.source_form ?? 'filing'} filed ${fund.source_filed ?? 'unknown'} (${fund.company_name}).`
+      : `Unavailable: ${fund.reason}`;
+
+    const disclosureLines = proposals.proposals.length > 0
+      ? `Records for ${ticker}: ${proposal.buys} purchase(s), ${proposal.sells} sale(s); ${proposal.buy_owners.length} distinct buyer(s): ${proposal.buy_owners.join(', ')}; aggregate filed range ${proposal.total_range_label}; latest filing published ${proposal.latest_published}.`
+      : 'none';
+
+    const result = await runResearchAgent({
+      ticker,
+      company: proposal.company,
+      score: proposal.score,
+      disclosure_summary: disclosureLines,
+      fundamentals_summary: fundSummary,
+    });
+    if (!result.ok) return fail(res, 502, result.error);
+    researchCache.set(ticker, { at: Date.now(), verdict: result.verdict });
+    res.json({ verdict: result.verdict, cached: false });
   });
 
   // ---- chat ----

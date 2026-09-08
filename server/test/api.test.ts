@@ -128,6 +128,46 @@ test('chat refuses LLM mode when unconfigured', async () => {
   assert.match(res.body.error, /not configured/i);
 });
 
+// ---- research agent endpoint ---------------------------------------------
+
+test('research endpoint: invalid ticker 400, unknown ticker 404, config not leaked', async () => {
+  const bad = await postJson('/api/research/!!!');
+  assert.equal(bad.status, 400);
+
+  const unknown = await postJson('/api/research/ZZZZZ');
+  assert.ok([404, 502].includes(unknown.status), `unknown ticker → 404 or transport error (got ${unknown.status})`);
+  if (unknown.status === 404) {
+    assert.match(unknown.body.error, /no stored disclosure data/i);
+  }
+
+  // Config is server-side only: the response never echoes model/key material.
+  const bodyText = JSON.stringify(unknown.body);
+  assert.doesNotMatch(bodyText, /sk-|Bearer /i, 'no key material in error output');
+});
+
+test('agent config prefers local daemon by default and reports search availability', async () => {
+  const { getAgentConfig } = await import('../src/ollamaAgent.js');
+  const saved = { key: process.env.OLLAMA_API_KEY, model: process.env.OLLAMA_AGENT_MODEL, host: process.env.OLLAMA_AGENT_HOST };
+  try {
+    delete process.env.OLLAMA_API_KEY;
+    delete process.env.OLLAMA_AGENT_MODEL;
+    delete process.env.OLLAMA_AGENT_HOST;
+    const cfg = getAgentConfig();
+    assert.equal(cfg.chatHost, 'http://127.0.0.1:11434', 'defaults to local daemon');
+    assert.equal(cfg.searchEnabled, false, 'no key → no web search');
+    assert.equal(cfg.model, 'gpt-oss:120b-cloud');
+
+    process.env.OLLAMA_API_KEY = 'test-key';
+    const cfg2 = getAgentConfig();
+    assert.equal(cfg2.chatHost, 'http://127.0.0.1:11434', 'chat stays on local daemon (key is only for web search)');
+    assert.equal(cfg2.searchEnabled, true);
+  } finally {
+    if (saved.key) process.env.OLLAMA_API_KEY = saved.key; else delete process.env.OLLAMA_API_KEY;
+    if (saved.model) process.env.OLLAMA_AGENT_MODEL = saved.model; else delete process.env.OLLAMA_AGENT_MODEL;
+    if (saved.host) process.env.OLLAMA_AGENT_HOST = saved.host; else delete process.env.OLLAMA_AGENT_HOST;
+  }
+});
+
 // ---- mutation guards ----------------------------------------------------
 
 test('mutation guards: hostile Origin/Host/content-type rejected, legit accepted', async () => {
@@ -647,4 +687,83 @@ test('advisor mode is server-controlled and shapes the prompt', async () => {
   // The browser cannot flip it: settings only reports the mode.
   const s = await agent().get('/api/settings');
   assert.equal(s.body.providers.llm_endpoint.advisor_mode, 'analyst');
+});
+
+// ---- fundamentals (SEC EDGAR) -------------------------------------------
+
+test('buildTickerMap parses SEC company_tickers.json and rejects junk', async () => {
+  const { buildTickerMap } = await import('../src/fundamentals.js');
+  const map = buildTickerMap({
+    '0': { ticker: 'aapl', cik_str: 320193, title: 'Apple Inc.' },
+    '1': { ticker: 'MSFT', cik_str: 789019, title: 'MICROSOFT CORP' },
+    '2': { ticker: '', cik_str: 1 },                    // no ticker → skipped
+    '3': { ticker: 'NOCIK', cik_str: 'x' },              // non-numeric CIK → skipped
+    '4': 'garbage',                                      // non-object → skipped
+  });
+  assert.equal(map['AAPL']?.cik, '0000320193', 'ticker uppercased, CIK zero-padded');
+  assert.equal(map['MSFT']?.title, 'MICROSOFT CORP');
+  assert.equal(map['NOCIK'], undefined);
+  // Non-object input yields an empty map rather than throwing.
+  assert.deepEqual(buildTickerMap(null), {});
+  assert.deepEqual(buildTickerMap(42), {});
+});
+
+test('fundamentals endpoint: 400 on missing ticker, 404 with reason on invalid/unknown', async () => {
+  const missing = await agent().get('/api/fundamentals');
+  assert.equal(missing.status, 400);
+
+  const invalid = await agent().get('/api/fundamentals?ticker=' + encodeURIComponent('!!!'));
+  assert.equal(invalid.status, 404);
+  assert.match(invalid.body.error, /not a valid ticker/);
+
+  // Valid shape, no real filer: honest reason, never fabricated figures.
+  const unknown = await agent().get('/api/fundamentals?ticker=ZZZZZ');
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.body.error, unknown.body.error, 'error is a string reason');
+  assert.equal(unknown.body.fundamentals, undefined, 'no fundamentals object invented');
+});
+
+// ---- proposals / trends ---------------------------------------------------
+
+test('proposals: rank buy-side records, carry reasons/counterpoints, filter non-stock', async () => {
+  const { buildProposals } = await import('../src/proposals.js');
+  const now = new Date('2026-09-08T12:00:00Z');
+  const mk = (id: string, ticker: string, company: string, owner: string, tx: 'purchase' | 'sale', published: string, min: number, max: number): any => ({
+    id, ticker, company, owner, owner_role: 'House', tx_type: tx,
+    tx_date_min: published, tx_date_max: published, published_date: published,
+    amount_min_usd: min, amount_max_usd: max, amendment: false,
+    source_name: 'test', source_url: null, data_mode: 'imported',
+  });
+  const d: any = {
+    disclosures: [
+      mk('r1', 'AAA', 'Alpha Corp Common Stock', 'Rep One', 'purchase', '2026-08-01', 1000, 15000),
+      mk('r2', 'AAA', 'Alpha Corp Common Stock', 'Rep Two', 'purchase', '2026-08-15', 5000, 60000),
+      mk('r3', 'BBB', 'Some County Tax & Revenue Anticipation Notes [BBB]', 'Rep Three', 'purchase', '2026-08-01', 1000, 15000),
+      mk('r4', 'CCC', 'Charlie Corp', 'Rep One', 'sale', '2026-08-01', 1000, 15000),
+    ],
+  };
+  const out = await buildProposals(d, now);
+  const tickers = out.proposals.map((p) => p.ticker);
+  assert.ok(tickers.includes('AAA'), 'AAA proposed (2 distinct buyers)');
+  assert.ok(!tickers.includes('BBB'), 'municipal notes filtered out of proposals');
+  assert.ok(!tickers.includes('CCC'), 'sale-only ticker not proposed');
+  const aaa = out.proposals.find((p) => p.ticker === 'AAA')!;
+  assert.equal(aaa.buy_owners.length, 2);
+  assert.ok(aaa.score >= 44, `two-buyer cluster scores reasonably (got ${aaa.score})`);
+  assert.ok(aaa.reasons.length > 0 && aaa.counterpoints.length > 0, 'ships reasons AND counterarguments');
+  assert.ok(aaa.record_ids.includes('r1'), 'citations point at stored records');
+  assert.equal(out.proposals[0].ticker, 'AAA', 'AAA ranks above weaker candidates');
+});
+
+test('trends endpoint aggregates the store', async () => {
+  const res = await agent().get('/api/trends');
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray(res.body.most_bought));
+  assert.ok(Array.isArray(res.body.most_sold));
+  assert.ok(Array.isArray(res.body.by_volume));
+  assert.ok(Array.isArray(res.body.top_filers));
+  const proposals = await agent().get('/api/proposals');
+  assert.equal(proposals.status, 200);
+  assert.ok(Array.isArray(proposals.body.proposals));
+  assert.ok(proposals.body.notes.length >= 3, 'limitations stated on the payload');
 });
