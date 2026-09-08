@@ -50,7 +50,7 @@ export function ChatPanel() {
     setMessages((m) => [...m, { role: 'user', content: question, ts: new Date().toISOString() }]);
     setInput('');
     try {
-      const res = await api.ask(question, mode, mode === 'llm', ticker);
+      const res = await api.ask(question, mode, ticker);
       setMessages((m) => [...m, res.message]);
       load(ticker);
     } catch (e) {
@@ -99,6 +99,15 @@ export function ChatPanel() {
         {messages.map((m, i) => (
           <div key={i} className={`chat-msg ${m.role}`}>
             <div className="chat-bubble">{m.content}</div>
+            {m.citations && m.citations.length > 0 && (
+              <div className="chat-citations">
+                {m.citations.slice(0, 8).map((c, j) => (
+                  c.source_url
+                    ? <a key={j} href={c.source_url} target="_blank" rel="noreferrer" className="chat-citation">{c.source_name ?? c.source_url}</a>
+                    : <span key={j} className="chat-citation">{c.source_name ?? c.record_id}</span>
+                ))}
+              </div>
+            )}
           </div>
         ))}
         {busy && <div className="chat-msg assistant"><div className="chat-bubble muted">thinking…</div></div>}

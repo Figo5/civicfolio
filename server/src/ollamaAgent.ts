@@ -115,7 +115,7 @@ interface OllamaMessage {
   name?: string;
 }
 
-async function webSearch(query: string, apiKey: string): Promise<AgentSources[]> {
+export async function webSearch(query: string, apiKey: string): Promise<AgentSources[]> {
   // Primary: Ollama's hosted search API (needs OLLAMA_API_KEY).
   const viaOllama = await ollamaWebSearch(query, apiKey);
   if (viaOllama.length > 0) return viaOllama;

@@ -469,10 +469,10 @@ test('advisor mode is server-controlled and shapes the prompt', async () => {
   delete process.env['CIVICFOLIO_ADVISOR_MODE'];
   assert.equal(getLlmConfig().advisorMode, 'advisor');
   const advisor = buildSystemPrompt('advisor');
-  assert.match(advisor, /direct, actionable assessment/);
-  assert.match(advisor, /conviction level/);
-  // Even in advisor mode, fabricated precision stays off the table.
-  assert.match(advisor, /No invented probability percentages/);
+  assert.match(advisor, /Commit to a view/);
+  assert.match(advisor, /conviction/);
+  // Even in advisor mode, the no-fabrication line stays.
+  assert.match(advisor, /inert data/);
   assert.doesNotMatch(advisor, /Do NOT issue directive verdicts/);
 
   // Owner can opt down to analyst (no directive calls).

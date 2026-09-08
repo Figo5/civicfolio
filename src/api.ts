@@ -101,8 +101,8 @@ export const api = {
   verdictLog: () => get<{ entries: VerdictLogEntry[] }>('/api/verdict-log'),
   fundamentals: (ticker: string) =>
     get<{ fundamentals: Fundamentals }>(`/api/fundamentals?ticker=${encodeURIComponent(ticker)}`),
-  ask: (question: string, mode: 'deterministic' | 'llm', includePortfolio = false, ticker?: string) =>
-    post<{ message: ChatMessage }>('/api/chat', { question, mode, include_portfolio: includePortfolio, ticker }),
+  ask: (question: string, mode: 'deterministic' | 'llm', ticker?: string) =>
+    post<{ message: ChatMessage }>('/api/chat', { question, mode, ticker }),
   portfolio: () => get<PortfolioSummary>('/api/portfolio'),
   trades: () => get<{ trades: PaperTrade[] }>('/api/portfolio/trades'),
   setMark: (ticker: string, price: number | null) =>
