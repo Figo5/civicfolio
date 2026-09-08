@@ -89,10 +89,7 @@ export function TrackRecord({ onOpen }: { onOpen: (t: string) => void }) {
 
       {entries.length > 0 && (
         <p className="provenance">
-          {summary?.disclaimer} Fixed-horizon outcomes are <b>pending/unmeasured</b> — no defensible
-          outcome data exists yet, and none is invented here. The change column describes what the
-          (delayed, current) price did over the elapsed period; it spans whole-market movement, not the
-          quality of the call. A BEARISH view is not a short position and shows no profit/loss.
+          Descriptive only — the change column spans whole-market movement, not the quality of the call.
         </p>
       )}
     </div>

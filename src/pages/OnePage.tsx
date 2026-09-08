@@ -196,15 +196,9 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
                       <li key={i}><a href={sx.url} target="_blank" rel="noreferrer noopener">{sx.title}</a></li>
                     ))}
                   </ul>
-                  <p className="provenance">References retrieved during research — not proof that every claim was verified. Confidence is qualitative, not a probability.</p>
+                  <p className="provenance">Retrieved references. Confidence is qualitative.</p>
                 </>
               )}
-              <p className="provenance">
-                <b>anchor match</b> means the number equals a real level in this ticker's own data — an SMA, the
-                6-month range, or the current price. It is an anchor match, NOT a validated prediction.{' '}
-                <b>unsupported</b> means it matches nothing supplied; treat it as the model's invention rather than a
-                level. This is a research hypothesis, not advice.
-              </p>
             </div>
           )}
 
@@ -312,9 +306,7 @@ function Insights({ onOpen }: { onOpen: (t: string) => void }) {
             </>
           )}
 
-          <p className="provenance">
-            {board.notes.join(' ')} Open one and hit <b>Research with AI</b> for a research view with levels.
-          </p>
+          <p className="provenance">{board.notes.join(' ')}</p>
         </>
       )}
     </div>
@@ -407,10 +399,8 @@ export function OnePage() {
           </div>
         )}
         <p className="provenance">
-          Delayed, unofficial market data{fetchedAt ? ` fetched ${new Date(fetchedAt).toLocaleTimeString()}` : ''} from a
-          public endpoint that can change or rate-limit without notice — not a real-time trading feed, and not
-          guaranteed to stay available. Each quote carries its own delay. Earnings dates marked <b>*</b> are the
-          provider's estimate, not confirmed by the company.
+          Delayed, unofficial market data{fetchedAt ? ` fetched ${new Date(fetchedAt).toLocaleTimeString()}` : ''}.
+          Earnings dates marked <b>*</b> are the provider's estimate.
         </p>
       </div>
 

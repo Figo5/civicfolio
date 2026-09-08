@@ -99,11 +99,10 @@ function del<T>(url: string): Promise<T> {
 export const api = {
   meta: () => get<Meta>('/api/meta'),
   settings: () => get<SettingsResponse>('/api/settings'),
-  chat: (ticker?: string) =>
-    get<{ mode_available: boolean; ticker: string | null; messages: ChatMessage[]; threads: ChatThread[] }>(
-      `/api/chat${ticker ? `?ticker=${encodeURIComponent(ticker)}` : ''}`),
-  clearChat: (ticker?: string) =>
-    del<{ ok: boolean; removed: number }>(`/api/chat${ticker ? `?ticker=${encodeURIComponent(ticker)}` : ''}`),
+  chat: () =>
+    get<{ mode_available: boolean; ticker: string | null; messages: ChatMessage[]; threads: ChatThread[] }>('/api/chat'),
+  clearChat: () =>
+    del<{ ok: boolean; removed: number }>('/api/chat'),
   insights: () => get<InsightBoard>('/api/insights'),
   verdictLog: () => get<{ entries: VerdictLogEntry[] }>('/api/verdict-log'),
   fundamentals: (ticker: string) =>
