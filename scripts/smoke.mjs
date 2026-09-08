@@ -187,10 +187,10 @@ console.log(`Smoke testing ${BASE} (isolated temp data dir)…\n`);
   });
 }
 
-// 8. settings/meta: robinhood not configured, no secrets
+// 8. settings/meta: robinhood removed (research-only), no secrets
 {
   const { json } = await req('GET', '/api/settings');
-  check('robinhood not configured', json?.robinhood?.status === 'not_configured');
+  check('robinhood integration removed (execution disabled)', json?.robinhood?.status === 'removed' && json?.robinhood?.execution_enabled === false);
   check('llm endpoint reported as not configured by default', json?.providers?.llm_endpoint?.status === 'not_configured');
   check('settings payload contains no key material', !JSON.stringify(json).match(/sk-/i));
   const { json: meta } = await req('GET', '/api/meta');

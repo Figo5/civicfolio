@@ -56,18 +56,32 @@ export interface ChatCitation {
   source_name?: string;
 }
 
+/** What a data source actually returned for one request — shown to model and user. */
+export interface DataSourceStatus {
+  available: boolean;
+  /** The source's own timestamp, when it has one. Null means UNKNOWN, not "fetched now". */
+  as_of: string | null;
+  note: string;
+}
+
 export interface ChatMessage {
   // Which stock this message belongs to. Threads are keyed by ticker so a
-  // conversation about NVDA never bleeds into one about AMD.
+  // conversation about NVDA never bleeds into one about AMD. Set on BOTH the
+  // user message and the assistant reply so they land in the same thread.
   ticker?: string;
   role: 'user' | 'assistant';
   content: string;
   citations?: ChatCitation[];
   mode?: 'deterministic' | 'llm';
   ts: string;
+  // Provenance of the answer. Legacy messages predate these fields: their
+  // absence itself marks them as unverified (shown by timestamp/provenance,
+  // never deleted).
+  model_used?: string | null;
+  data_sources?: Record<string, DataSourceStatus>;
 }
 
-/** A recommendation as it stood when made, so it can be scored later. */
+/** A recommendation as it stood when made, so it can be revisited later. */
 export interface VerdictLogEntry {
   id: string;
   ticker: string;
@@ -84,14 +98,18 @@ export interface VerdictLogEntry {
   unsupported_levels: number;
   model: string;
   created_at: string;
+  // Evidence state at call time: were sources up, and what did they say?
+  sources_available?: boolean;
+  data_notes?: string;
 }
 
 export interface ScoredVerdict extends VerdictLogEntry {
   price_now: number | null;
   change_pct: number | null;
   elapsed_days: number;
+  // Direction the verdict implied, for description only. NOT a scored outcome:
+  // calling a call "right" from one price point is not a benchmark.
   direction: 'bullish' | 'bearish' | 'neutral';
-  outcome: 'correct' | 'wrong' | 'flat' | 'un_scored';
 }
 
 export interface AppData {

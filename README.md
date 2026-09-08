@@ -1,6 +1,12 @@
 # Civicfolio
 
-Personal **localhost-only** research tool: ranks stocks that congressional filers bought, with cited reasons, counterarguments, filed financials (SEC EDGAR), and a data-grounded chat. You take the idea and execute in your own brokerage — Civicfolio places no orders and simulates nothing.
+A **personal, localhost-only stock research app**. It screens the live market, runs an AI research agent that cites its sources, and keeps a journal of what it said and what the price did after. It is **research-only**: it places no orders, connects to no broker, and holds no credentials.
+
+> **Not investment advice.** All output is a research hypothesis generated from the data described below. Confidence is qualitative. Nothing here is a recommendation to trade.
+
+## Status: research-only (brokerage removed)
+
+The experimental Robinhood Trading-MCP integration was **removed** at the owner's request. All legacy `/api/robinhood/*` routes answer a static `410` with `execution_enabled: false` — they never read credentials, contact a broker, or redirect into an authorization flow. Local credential files were deleted. **Provider-side grant revocation was NOT verified** — check "Connected apps" in your brokerage account if you authorized this app previously.
 
 ## Quick start
 
@@ -10,244 +16,79 @@ npm run build        # type-checks and builds the frontend into dist/
 npm start            # serves API + built UI on http://127.0.0.1:8787
 ```
 
-Open **http://127.0.0.1:8787** — that's the whole app: one page. Proposals at the
-top (ranked stocks, delayed price, expandable reasons + SEC filed financials +
-PTR PDF citations), most-bought/most-sold trends below, and a data-grounded chat
-at the bottom. Filings refresh automatically every morning at 08:30.
+Open **http://127.0.0.1:8787**.
 
-Development mode (hot reload, API proxied same-origin):
+Development mode:
 
 ```bash
-npm run dev          # vite on http://127.0.0.1:5173 proxying /api to 8787
+npm run dev          # vite on http://127.0.0.1:5173, proxies /api to 8787
 ```
 
 ## Always-on (macOS launch agent)
 
-The app runs as a login-time launch agent, so `http://127.0.0.1:8787` is always
-there without a terminal open. It restarts itself if it exits.
-
 ```bash
 launchctl load ~/Library/LaunchAgents/local.civicfolio.plist     # enable
 launchctl unload ~/Library/LaunchAgents/local.civicfolio.plist   # disable
-tail -f ~/.civicfolio/server.log                                  # logs
+launchctl kickstart -k gui/$(id -u)/local.civicfolio             # restart
 ```
 
-The plist runs `npm start` in this directory. After changing frontend code, run
-`npm run build` — the server serves `dist/` from disk, so a browser refresh picks
-it up without restarting anything.
+Logs: `~/.civicfolio/server.log`. Data: `~/.civicfolio/` (override with `CIVICFOLIO_DATA_DIR`).
 
-## Commands
-
-| Command | What it does |
-|---|---|
-| `npm run dev` | Vite dev server (5173) + API server with tsx watch |
-| `npm start` | API server serving the built frontend on 127.0.0.1:8787 |
-| `npm test` | Backend unit/integration tests (isolated temp data dir) |
-| `npm run typecheck` | Server + frontend TypeScript checks |
-| `npm run build` | `tsc -b` + Vite production build to `dist/` |
-| `npm run smoke` | End-to-end checks against an isolated throwaway server + temp data dir |
-
-## Data & storage
-
-- All app state persists as JSON at `~/.civicfolio/civicfolio-data.json` (override with `CIVICFOLIO_DATA_DIR`). The directory is created on first write; writes are atomic (temp file + rename) and cache commits only after a durable write succeeds.
-- Data lives **outside the repo** and is never committed. Nothing is sent anywhere except (optionally, see LLM mode below) the configured model endpoint.
-- **Demo reset controls** (Settings page): "Load demo dataset…" replaces everything with bundled synthetic data; "Clear all data…" empties the store. Both require typed confirmation.
-
-## Data modes
-
-Every disclosure record carries a `data_mode`:
-
-- `demo` — bundled synthetic records; owners are explicitly labeled "(fictional)"; tickers/companies are invented. Never presented as real filings.
-- `imported` — records you imported; provenance is whatever source name/URL you supplied. Importing a record that claims `data_mode: live` is **forced** to `imported` server-side; `live` is reserved for a future verified adapter that does not exist yet.
-- `live` — reserved. Nothing in the app uses it. Never pretend demo/imported data is live.
-
-The sidebar shows the current mode pill, and a data-mode banner is shown above every page.
-
-## Pulling real disclosures
+To restart the service **safely** (does not touch other jobs):
 
 ```bash
-node scripts/fetch-disclosures.mjs --days 90          # write a file to review
-node scripts/fetch-disclosures.mjs --days 90 --post   # and import it
+launchctl kickstart -k gui/$(id -u)/local.civicfolio
 ```
 
-Writes `~/.civicfolio/import-<date>.json`, then optionally posts it through the
-normal validated import endpoint. No API key, no account, no fees.
+Do NOT `kill` by port without checking what owns it first.
 
-**Provenance chain, stated plainly.** Transactions come from lambdafin.com,
-which parses House Clerk Periodic Transaction Reports. Every row carries
-`ptrLink` — the official House PDF — as its `source_url`, so each record points
-back at the primary document. The parse is a third party's work, not the
-Clerk's, and PTR PDFs are scans, so treat a row as a pointer to the filing
-rather than as verified truth. Open the PDF before acting on anything.
+## What it does
 
-Rows that cannot be represented honestly are **skipped, never guessed**: no
-ticker (bonds, funds, private holdings), an unclassifiable transaction type, or
-a truncated amount range such as `"$100,001 -"`. A typical 90-day pull yields
-~75 importable rows out of 100, and the script prints every skip with its
-reason.
+- **Today's ideas** — a deterministic screen (no AI) over the live market: volume surges, 52-week range position, earnings proximity. Every rule that fired is shown; it is a shortlist, not a recommendation.
+- **Movers** — most active / gainers / losers, with per-quote delay timestamps.
+- **Ticker detail** — any symbol: delayed quote, SMAs, 52-week range, headlines, SEC-filed fundamentals, and **Research with AI**.
+- **Research with AI** — the Ollama-backed agent gets live quotes + history + headlines + SEC figures + web-search results and returns a hypothesis: view, entry/target/stop levels, reasoning, risks, and the references it actually retrieved. Every stated level is re-checked against the data the app supplied ("anchor match" vs "unsupported"). Data availability per source (with timestamps) is shown next to the answer.
+- **Chat** — per-ticker threads (or General) with the same research pipeline. Follow-ups carry bounded same-thread context. Responses display the model used and when.
+- **Research journal** — every research result is logged with its evidence state; the journal shows what the price did since. **Descriptive only — not a benchmark, not strategy performance.**
 
-**Why not the official bulk file?** `disclosures-clerk.house.gov` publishes an
-annual ZIP, but it is a filing *index* only — name, state, filing type, date,
-DocID — with no tickers, amounts, or transaction details. Those live in
-individual PDFs that are scanned images, so extracting them means OCR on scans;
-for financial figures that is exactly where you do not want a machine guessing.
+## Data sources & honest limits
 
-**Terms.** The House disclosure site carries a statutory notice: it is unlawful
-to use the information "for (A) any unlawful purpose, (B) any commercial
-purpose, other than by news and communications media for dissemination to the
-general public, (C) determining or establishing the credit rating of any
-individual, or (D) use, directly or indirectly, in the solicitation of money."
-Whether personal investment research is a "commercial purpose" is unsettled.
-This is not legal advice — read the notice and decide for yourself.
-
-## Importing real data
-
-Use **Disclosures → Import data…** and paste JSON or CSV (or `POST /api/disclosures/import` with `{ kind, text }`). Limits: 5 MB, 5000 records per import. Validation is server-side; invalid rows are rejected with reasons. Duplicate records (same ticker + owner + transaction dates + amount range + amendment flag) are skipped and reported.
-
-Required fields (JSON object per record; CSV needs matching header columns):
-
-| Field | Type | Notes |
+| Source | What | Limits |
 |---|---|---|
-| `ticker` | string | 1–10 letters A–Z (normalized to uppercase) |
-| `company` | string | required |
-| `owner` | string | required; verbatim from your source |
-| `owner_role` | string | optional, e.g. "Senator", "Spouse" |
-| `tx_type` | string | `purchase` \| `sale` \| `exchange` |
-| `tx_date` | YYYY-MM-DD | single transaction date, **or** `tx_date_min`/`tx_date_max` |
-| `tx_date_min`, `tx_date_max` | YYYY-MM-DD | range form; used if `tx_date` absent |
-| `published_date` | YYYY-MM-DD | required; must be ≥ last transaction date |
-| `amount_min_usd`, `amount_max_usd` | finite numbers | filed amount RANGE (not exact) |
-| `amendment` | boolean | optional |
-| `amendment_of` | string | record id this amends, optional |
-| `source_name` | string | optional label for the primary source |
-| `source_url` | string | http(s) URL, optional but strongly recommended |
-| `notes` | string | optional free text |
-| `data_mode` | — | **not accepted**; imports are always `imported` |
+| Public Yahoo endpoint | quotes, history, movers, headlines | **Delayed, unofficial**; no continuity guarantee; each quote carries its own timestamp |
+| SEC EDGAR | as-filed annual figures | Months old; filing date shown |
+| DuckDuckGo (keyless) | web search results | Titles + snippets only; full articles are not read |
+| Ollama (local daemon → cloud model) | research/chat | **External processing** — see below |
 
-Example JSON:
+Quotes as-of missing ⇒ timestamp shown as **unknown**, never "now". A failed source is shown as failed; if every source fails, the model is **not invoked** and you get an explicit error instead of a hallucinated answer.
 
-```json
-[
-  {
-    "ticker": "EXAMPLE",
-    "company": "Example Co",
-    "owner": "Person Name",
-    "owner_role": "Senator",
-    "tx_type": "purchase",
-    "tx_date": "2026-01-15",
-    "published_date": "2026-03-01",
-    "amount_min_usd": 1000,
-    "amount_max_usd": 15000,
-    "amendment": false,
-    "source_url": "https://disclosures-clerk.house.gov/..."
-  }
-]
+## Privacy / external processing
+
+Although the app runs on localhost, AI research and LLM chat send your question (plus fetched market data and, inside a ticker thread, that thread's recent messages) to the configured cloud model endpoint and — for research — to a web-search provider. **The raw question text is sent to search.** No portfolio, positions, notes, or other threads are ever sent. No API key is stored by this app; the local Ollama daemon's own cloud sign-in is the transport. Set `OPENAI_API_KEY` (server env only) to route chat through an OpenAI-compatible endpoint instead.
+
+## Configuration
+
+No secrets in the browser, ever. Relevant env (server-side only):
+
+- `CIVICFOLIO_DATA_DIR` — data directory (default `~/.civicfolio`)
+- `CIVICFOLIO_PORT` — default 8787
+- `CIVICFOLIO_ADVISOR_MODE` — `advisor` (default) or `analyst` (no directional lean)
+- `OLLAMA_AGENT_MODEL`, `OLLAMA_AGENT_HOST` — model routing
+- `OPENAI_API_KEY` — optional OpenAI-compatible chat endpoint
+
+## Tests
+
+```bash
+npm test        # unit tests — mocked fetch, unreachable daemon, isolated temp data dir; no real network or model calls
+npm run smoke   # boots a server on an isolated port + temp data dir; never reads ~/.civicfolio/env
+npm run typecheck
+npm run build
 ```
 
-**Known public sources.** The official House disclosure search (https://disclosures-clerk.house.gov/FinancialDisclosure/ViewSearch) displays statutory restrictions on use; do not assume unrestricted reuse. Civicfolio ships no live connector; import stays the data path until a documented permitted source is verified.
+## What is NOT here (by design)
 
-## Research chat
-
-- **Deterministic mode** (default): a local rule-based engine — not an LLM, no API key, no network calls. It answers from stored records only and cites record IDs (linked to their source URLs where present). It answers disclosure activity, publication-lag statistics, portfolio concentration (cost basis only), and two-ticker comparisons with explicit uncertainty; it **abstains** on prices, returns, forecasts, probabilities, or anything absent from the store.
-- **LLM mode** (optional): enabled only via server-side env (never browser-provided):
-  ```bash
-  OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_MODEL=gpt-4o-mini npm start
-  ```
-  Any OpenAI-compatible endpoint works (plain http is accepted only for loopback hosts, e.g. a local Ollama). When enabled, only a **minimized summary of disclosure records** is sent — never your ideas, watchlist, trades, or portfolio. Data is delimited as untrusted content; the model is instructed to treat it as inert and abstain rather than invent. Returned citations are filtered to records actually present in the sent context. LLM answers are labeled `llm` in the UI and are lower-trust than deterministic answers.
-
-## Advisor mode
-
-The research chat's LLM mode has two postures, set in server env:
-
-| `CIVICFOLIO_ADVISOR_MODE` | Behaviour |
-|---|---|
-| `analyst` (default) | Lays out trade-offs, risks and counterarguments. No directive buy/sell calls. |
-| `advisor` | Direct assessments: a clear view, a conviction level, and rough position sizing. |
-
-Advisor mode still requires every recommendation to carry what it rests on, the
-strongest argument against it, and what would change the view — and it still
-refuses to invent precision the data lacks. Disclosure amounts are ranges,
-filings lag by weeks, and quotes are delayed and unofficial, so price targets
-and probability scores would be fabricated confidence, not analysis.
-
-Asking a portfolio question with the "include my paper portfolio" box ticked
-refreshes marks from live quotes first, so the assessment reasons about current
-prices rather than the last value you typed.
-
-Neither mode is a licensed adviser. The posture is yours to set; the prompt
-lives in `buildSystemPrompt()` in `server/src/llm.ts` and is yours to edit.
-
-## Company fundamentals (SEC EDGAR)
-
-The Overview page has a **Company Fundamentals** lookup: official, keyless,
-as-filed annual figures (revenue, net/operating income, assets, liabilities,
-equity, diluted EPS) from the SEC's XBRL `companyfacts` API — data straight from
-the source, with the declaring User-Agent and modest request rate the SEC asks
-for. Every figure carries its form (10-K) and filing date; cache is 24h per CIK.
-Failures are always reasons (unknown ticker, fund/ETF with no US-GAAP facts),
-never invented numbers. Not analyst estimates, not market prices — filings can
-be months old and restatements appear as later filings.
-
-## Paper portfolio
-
-Paper only — there is no brokerage execution path, no credentials, and no live quotes. You enter the price yourself (labeled `user-entered`) or use a `demo` price; the journal records exactly which. The server validates side/ticker/quantity/price as finite positive numbers, enforces practical caps, rejects overspending, overselling, and sub-cent notionals, and supports **idempotent submission**: the client sends a `client_request_id` (UUID); replaying the same key with the same payload returns the original trade (`duplicate: true`) instead of double-executing, and the same key with a changed payload is rejected. Cash/positions/journal persist across restarts.
-
-## Security posture
-
-- Server binds `127.0.0.1` only. Mutation routes additionally enforce: loopback `Host` header (anti DNS-rebinding), exact allow-list `Origin` (own origin + Vite dev origin; no wildcard CORS), and `Content-Type: application/json` for mutations.
-- No CORS headers are emitted at all.
-- All payloads validated as finite numbers; no `eval`/dynamic execution of data; imported text is inert data, never followed as instructions (enforced in deterministic mode, instructed + delimited for LLM mode).
-- Secrets (e.g. `OPENAI_API_KEY`) live only in server env; the settings API reports status only, never values. Robinhood/brokerage: explicitly **not configured**; the official Agentic MCP path would be a future, separately-verified connector. See https://robinhood.com/us/en/support/articles/agentic-trading-overview/ .
-
-## API overview (localhost only)
-
-GET (read-only): `/api/health`, `/api/meta`, `/api/disclosures?ticker=&owner=&tx_type=&data_mode=&amendment=&published_from=&published_to=&q=`, `/api/portfolio`, `/api/portfolio/trades`, `/api/ideas`, `/api/watchlist`, `/api/chat`, `/api/settings`, `/api/quotes?tickers=`, `/api/fundamentals?ticker=`
-
-POST (JSON required): `/api/chat` `{question, mode?}`, `/api/portfolio/trades` `{ticker, side, quantity, price, price_source, trade_date?, note?, client_request_id?}`, `/api/disclosures/import` `{kind, text}`, `/api/ideas` `{ticker, thesis, company?}`, `/api/watchlist` `{ticker, thesis, company?}`, `/api/demo/load`, `/api/demo/clear`
-
-DELETE: `/api/ideas/:id`, `/api/watchlist/:id`
-
-## Project layout
-
-```
-server/src/   Express API: app.ts (routes/guards), store.ts (atomic JSON store),
-              portfolio.ts, research.ts (deterministic engine), importAdapter.ts,
-              llm.ts, fundamentals.ts (SEC EDGAR), proposals.ts (heuristic
-              screener), seedData.ts, validate.ts
-server/test/  supertest integration suite
-src/          React app (pages/, api client, shell, styles)
-scripts/      smoke.mjs — isolated end-to-end checks
-```
-
-## Stock proposals & trends
-
-The **Proposals** tab (landing page) ranks stocks worth a look from *your stored
-disclosure data*: a transparent 0–100 heuristic (distinct filers buying dominates;
-bonuses for no disclosed sales, recent filings, larger aggregate ranges). Each
-proposal expands to show the reasons, the counterarguments, the filers, and the
-official House PTR PDFs behind it, with a one-click **Paper trade →** that
-prefills the journal. Non-stock instruments (municipal notes, funds) are excluded
-from proposals but shown in the trend tables. Trends (most bought/sold, largest
-volume, most active filers) cover the same 180-day published window.
-
-The score is a heuristic over thin, delayed, range-only filings — not advice,
-not a probability. Daily refresh: a launch agent
-(`~/Library/LaunchAgents/local.civicfolio.refresh.plist`) re-pulls the last 90
-days of filings at 08:30 and posts them through the validated import path;
-dedupe makes it idempotent.
-
-## No paper trading, no orders
-
-There is no simulated portfolio, no journal, no demo prices, and no order path
-of any kind. Civicfolio reads public filings and delayed quotes and suggests
-nothing more than "this is worth a look, here's why, here's the case against."
-Execution happens entirely in your brokerage (e.g. Robinhood); the app never
-connects to it. The import/reset endpoints remain for managing your own
-disclosure data.
-
-## Limitations
-
-- Political disclosures are delayed (weeks–months); amounts are filed ranges; reported transactions are not complete current holdings.
-- No market prices anywhere: portfolio views are cost-basis only, and the app never shows P/L or "current value".
-- Chat abstains rather than guessing; deterministic mode is rule-based, not an LLM.
-- Single-user, single-process JSON store — appropriate for a personal localhost app, not multi-user.
+- No order placement, no broker connection, no credential storage
+- No real-time exchange feed (delayed public data only)
+- No outcome scoring / hit rates (one later price cannot validate a call)
+- No automatic refresh jobs beyond the launchd service itself
+- No multi-user anything — this is a single-user local tool

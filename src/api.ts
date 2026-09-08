@@ -11,10 +11,11 @@ export interface SettingsResponse {
   data_mode: string;
   providers: {
     deterministic_engine: { status: string; note: string };
+    research_agent?: { status: string; model: string; web_search: boolean; note: string };
     llm_endpoint: { status: string; has_key: boolean; model_when_configured?: string; base_url_when_configured?: string; note: string };
   };
   data: { dir: string; demo_loaded_at: string | null; imports: { filename: string; imported_at: string; count: number }[] };
-  robinhood: { status: string; note: string };
+  robinhood: { status: string; execution_enabled?: boolean; note: string };
 }
 
 export interface Fundamentals {
@@ -27,12 +28,18 @@ export interface Fundamentals {
 
 
 export interface ChatCitation { record_id?: string; source_url?: string | null; source_name?: string }
+export interface DataSourceStatus { available: boolean; as_of: string | null; note: string }
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   citations?: ChatCitation[];
   mode?: 'deterministic' | 'llm';
   ts: string;
+  // Provenance. Legacy messages lack these — the UI marks them unverified
+  // rather than deleting them.
+  ticker?: string;
+  model_used?: string | null;
+  data_sources?: Record<string, DataSourceStatus>;
 }
 
 export interface PortfolioSummary {
@@ -118,28 +125,14 @@ export const api = {
       `/api/market/movers?kind=${kind}&count=${count}`),
   snapshot: (ticker: string) => get<TickerSnapshot>(`/api/market/ticker/${encodeURIComponent(ticker)}`),
   research: (ticker: string) =>
-    post<{ verdict: AgentVerdict; cached: boolean }>(`/api/research/${encodeURIComponent(ticker)}`, {}),
+    post<{ verdict: AgentVerdict; cached: boolean; data_sources?: Record<string, DataSourceStatus>; source_note?: string }>(`/api/research/${encodeURIComponent(ticker)}`, {}),
   watchlist: () => get<{ items: { id: string; ticker: string; thesis: string }[] }>('/api/watchlist'),
   addIdea: (ticker: string, thesis: string, company?: string) => post<{ idea: { id: string } }>('/api/ideas', { ticker, thesis, company }),
   removeIdea: (id: string) => del<{ ok: boolean }>(`/api/ideas/${encodeURIComponent(id)}`),
   addWatch: (ticker: string, thesis: string, company?: string) => post<{ item: { id: string } }>('/api/watchlist', { ticker, thesis, company }),
   removeWatch: (id: string) => del<{ ok: boolean }>(`/api/watchlist/${encodeURIComponent(id)}`),
-  // Robinhood (official Trading MCP)
-  rhStatus: () =>
-    get<{ connected: boolean; expires_at: string | null; has_refresh: boolean; account_hint: string | null; expired_soon?: boolean; note: string }>('/api/robinhood/status'),
-  rhConnect: () => post<{ authorization_url: string }>('/api/robinhood/connect', {}),
-  rhDisconnect: () => post<{ ok: boolean }>('/api/robinhood/disconnect', {}),
-  rhVerify: () => post<{ ok: boolean; error?: string; tools?: string[] }>('/api/robinhood/verify', {}),
-  rhReview: (t: { ticker: string; side: 'buy' | 'sell'; quantity: number; kind?: 'market' | 'limit'; limit_price?: number | null }) =>
-    post<{ review: unknown }>('/api/robinhood/review', t),
-  rhPlace: (t: { ticker: string; side: 'buy' | 'sell'; quantity: number; kind?: 'market' | 'limit'; limit_price?: number | null; client_request_id?: string; confirm: true }) =>
-    post<{ order: unknown }>('/api/robinhood/place', t),
-  rhPositions: () => get<{ positions: unknown }>('/api/robinhood/positions'),
   verdictLogScored: () =>
     get<{ entries: ScoredVerdict[]; summary: TrackRecordSummary }>('/api/verdict-log'),
-  rhAlerts: () => get<{ alerts: unknown }>('/api/robinhood/alerts'),
-  rhCreateAlert: (ticker: string, direction: 'above' | 'below', price: number) =>
-    post<{ alert: unknown }>('/api/robinhood/alerts', { ticker, direction, price }),
 };
 
 export const fmtUsd = (n: number): string =>
@@ -210,15 +203,20 @@ export interface VerdictLogEntry {
   price_at_call: number | null; entry_zone: string | null; exit_target: string | null;
   stop_loss: string | null; hold_horizon: string | null;
   grounded_levels: number; unsupported_levels: number; model: string; created_at: string;
-}
-
-export interface ScoredVerdict extends VerdictLogEntry {
-  price_now: number | null; change_pct: number | null; elapsed_days: number;
-  direction: 'bullish' | 'bearish' | 'neutral';
-  outcome: 'correct' | 'wrong' | 'flat' | 'un_scored';
+  sources_available?: boolean; data_notes?: string;
 }
 
 export interface TrackRecordSummary {
-  total: number; scored: number; correct: number; wrong: number;
-  hit_rate: number | null; avg_change_pct: number | null; bullish_count: number;
+  total: number; measured: number; unmeasured: number;
+  avg_change_pct: number | null; bullish_count: number;
+  disclaimer: string;
+}
+
+export interface ScoredVerdict extends VerdictLogEntry {
+  price_now: number | null;
+  change_pct: number | null;
+  elapsed_days: number;
+  // Description of what the price did since the observation. NOT an
+  // outcome grade: no correct/wrong, no hit rate.
+  direction: 'bullish' | 'bearish' | 'neutral';
 }

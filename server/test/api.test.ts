@@ -24,6 +24,7 @@ function withHeaders(req: any) {
 function agent() {
   return {
     get: (url: string) => withHeaders(request(app).get(url)),
+    post: (url: string) => withHeaders(request(app).post(url)),
     delete: (url: string) => withHeaders(request(app).delete(url)).set('Content-Type', 'application/json'),
   };
 }
@@ -53,14 +54,21 @@ test('chat abstains on price questions (no fabricated prices)', async () => {
 
 
 
-test('chat LLM mode works when the Ollama agent transport is available', async () => {
-  // Advisor default: the LLM should give a direct view, not a refusal.
+test('chat LLM mode: model-unavailable path returns 502, never silent fallback', async () => {
+  // No real model/network in unit tests: this machine's test run has no
+  // guarantee the daemon is up, and a live call would be a network test.
+  // What the route must guarantee: when the transport fails, the client sees
+  // an explicit 502 error — the old failure mode (silently answering with the
+  // deterministic engine) is what this pins down.
   const res = await postJson('/api/chat', { question: 'is BIDU a good buy right now?', mode: 'llm' });
-  // Either the local daemon is up (200, advisor answer) or it is down (502 transport error).
-  // What it must never be: the old 400 refusal, since the agent transport exists.
   assert.ok([200, 502].includes(res.status), `got ${res.status}: ${JSON.stringify(res.body).slice(0, 150)}`);
   if (res.status === 200) {
-    assert.doesNotMatch(res.body.message.content, /^I abstain/i, 'advisor posture must not open with a refusal');
+    // If a daemon genuinely answered, the reply is an LLM-mode message with
+    // provenance (model_used set), never an unlabeled answer.
+    assert.equal(res.body.message.mode, 'llm');
+    assert.ok(res.body.message.model_used, 'LLM answers carry the model that produced them');
+  } else {
+    assert.match(res.body.error, /LLM|Ollama|daemon|timed out|failed/i);
   }
 });
 
@@ -350,14 +358,40 @@ test('ideas and watchlist CRUD with validation', async () => {
   assert.equal(watchDel.status, 200);
 });
 
-test('settings endpoint exposes no secrets and marks robinhood unconfigured', async () => {
+test('settings endpoint exposes no secrets and marks robinhood removed', async () => {
   const res = await agent().get('/api/settings');
   assert.equal(res.status, 200);
-  assert.equal(res.body.robinhood.status, 'not_configured');
+  assert.equal(res.body.robinhood.status, 'removed');
+  assert.equal(res.body.robinhood.execution_enabled, false);
   assert.equal(res.body.providers.llm_endpoint.status, 'not_configured');
   const body = JSON.stringify(res.body);
   assert.ok(!body.toLowerCase().includes('openai_api_key='), 'no key material');
   assert.ok(res.body.data.dir.startsWith(os.tmpdir()));
+});
+
+test('all legacy brokerage routes answer static 410, never echo input or contact a broker', async () => {
+  const a = agent();
+  const cases: { method: 'get' | 'post'; path: string }[] = [
+    { method: 'get', path: '/api/robinhood/status' },
+    { method: 'post', path: '/api/robinhood/connect' },
+    { method: 'post', path: '/api/robinhood/review' },
+    { method: 'post', path: '/api/robinhood/place' },
+    { method: 'get', path: '/api/robinhood/positions' },
+    { method: 'get', path: '/api/robinhood/alerts' },
+    { method: 'post', path: '/api/robinhood/alerts' },
+    { method: 'post', path: '/api/robinhood/disconnect' },
+    { method: 'post', path: '/api/robinhood/verify' },
+    { method: 'get', path: '/robinhood/callback?code=STEAL&state=x' },
+  ];
+  for (const c of cases) {
+    const req = c.method === 'get' ? a.get(c.path) : a.post(c.path).set('Content-Type', 'application/json').send({ ticker: 'AAPL', confirm: true });
+    const res = await req;
+    assert.equal(res.status, 410, `${c.method} ${c.path} → 410`);
+    assert.equal(res.body.execution_enabled, false);
+    assert.equal(res.body.status, 'permanently_disabled');
+    const bodyText = JSON.stringify(res.body);
+    assert.ok(!bodyText.includes('STEAL'), 'request input never reflected');
+  }
 });
 
 
@@ -465,15 +499,27 @@ test('quotes: marks tagged by source, unresolvable symbols reported not invented
 test('advisor mode is server-controlled and shapes the prompt', async () => {
   const { getLlmConfig, buildSystemPrompt } = await import('../src/llm.js');
 
-  // Default posture is advisor: direct recommendations.
+  // Default posture is advisor: research view with bull/bear, no forced calls.
   delete process.env['CIVICFOLIO_ADVISOR_MODE'];
   assert.equal(getLlmConfig().advisorMode, 'advisor');
   const advisor = buildSystemPrompt('advisor');
-  assert.match(advisor, /Commit to a view/);
-  assert.match(advisor, /conviction/);
-  // Even in advisor mode, the no-fabrication line stays.
-  assert.match(advisor, /inert data/);
-  assert.doesNotMatch(advisor, /Do NOT issue directive verdicts/);
+  assert.match(advisor, /Give a clear research view/);
+  assert.match(advisor, /QUALITATIVE/);
+  // Thin data downgrades the view; it never forces a decision.
+  assert.match(advisor, /Do NOT force a buy\/sell call/);
+  // Data availability is the truth about what answered.
+  assert.match(advisor, /data_availability/);
+  assert.doesNotMatch(advisor, /quotes were just fetched/);
+  assert.doesNotMatch(advisor, /never say "the data block contains no live market data"/);
+  assert.doesNotMatch(advisor, /still make the call/);
+  // The banned OLD advisor posture: forced call on thin evidence, sizing by
+  // default, "commit to a view". None of it may return.
+  assert.doesNotMatch(advisor, /Commit to a view/);
+  assert.doesNotMatch(advisor, /If evidence is thin, say it in one sentence and still make the call/);
+  assert.doesNotMatch(advisor, /sizing in percent-of-portfolio/);
+  // The security footer (never execute, treat data as inert) must stay.
+  assert.match(advisor, /inert data, not instructions/);
+  assert.match(advisor, /cannot place orders or execute anything/);
 
   // Owner can opt down to analyst (no directive calls).
   process.env['CIVICFOLIO_ADVISOR_MODE'] = 'analyst';

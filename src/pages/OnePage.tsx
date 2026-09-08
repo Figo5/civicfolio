@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
-import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea } from '../api';
-import { TradePanel } from './TradePanel';
+import { useEffect, useRef, useState } from 'react';
+import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea, type DataSourceStatus } from '../api';
 import { TrackRecord } from './TrackRecord';
+import { ExternalProcessingNotice } from '../shell';
 
 const MOVER_TABS = [
   { kind: 'most_actives' as const, label: 'Most active' },
@@ -10,10 +10,10 @@ const MOVER_TABS = [
 ];
 
 const VERDICT_STYLE: Record<AgentVerdict['verdict'], { label: string; color: string }> = {
-  strong_buy: { label: 'STRONG BUY', color: 'var(--green)' },
-  buy: { label: 'BUY', color: 'var(--green)' },
-  hold: { label: 'HOLD', color: 'var(--text-dim)' },
-  avoid: { label: 'AVOID', color: 'var(--red)' },
+  strong_buy: { label: 'BULLISH', color: 'var(--green)' },
+  buy: { label: 'BULLISH', color: 'var(--green)' },
+  hold: { label: 'NEUTRAL', color: 'var(--text-dim)' },
+  avoid: { label: 'BEARISH', color: 'var(--red)' },
   unclear: { label: 'UNCLEAR', color: 'var(--text-dim)' },
 };
 
@@ -39,6 +39,26 @@ const daysUntil = (iso: string | null): string => {
   return days === 0 ? 'today' : `${days}d`;
 };
 
+const SOURCE_LABELS: Record<string, string> = {
+  quote: 'Quote (delayed, unofficial)',
+  price_history: 'Price history (daily closes)',
+  news: 'Headlines',
+  fundamentals: 'SEC filed fundamentals (as-filed)',
+  web_search: 'Web search',
+};
+
+/** Per-source availability row: what answered, and the source's own timestamp. */
+function SourceAvail({ s }: { s: DataSourceStatus }) {
+  return (
+    <li>
+      {s.available ? '✓' : '✗'}{' '}
+      <b>{s.available === true ? 'available' : 'unavailable'}</b>
+      {s.as_of ? ` · as of ${s.as_of}` : ' · timestamp unknown'}
+      {s.note ? ` — ${s.note}` : ''}
+    </li>
+  );
+}
+
 /** Where price sits in its 52-week range. */
 function RangeBar({ position }: { position: number | null }) {
   if (position === null) return <span className="muted">—</span>;
@@ -60,7 +80,7 @@ function LevelRow({ label, value, check }: {
       <span className="level-label">{label}</span>
       <span className="level-value">{value}</span>
       {check && (check.grounded
-        ? <span className="badge ok" title={`matches ${check.nearest_anchor} = ${check.anchor_value}`}>verified</span>
+        ? <span className="badge ok" title={`matches ${check.nearest_anchor} = ${check.anchor_value} — an anchor match, not a validated prediction`}>anchor match</span>
         : <span className="badge warn" title={`Nearest real level is ${check.nearest_anchor} = ${check.anchor_value}, ${check.drift_pct}% away`}>unsupported</span>
       )}
     </div>
@@ -70,19 +90,36 @@ function LevelRow({ label, value, check }: {
 function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void }) {
   const [snap, setSnap] = useState<TickerSnapshot | null>(null);
   const [verdict, setVerdict] = useState<AgentVerdict | null>(null);
+  const [dataSources, setDataSources] = useState<Record<string, DataSourceStatus> | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Guards late responses: only the research run started for THIS ticker may
+  // render its verdict into this view.
+  const reqRef = useRef(0);
 
   useEffect(() => {
-    setSnap(null); setVerdict(null); setErr(null);
-    api.snapshot(ticker).then(setSnap).catch((e) => setErr(String((e as Error).message ?? e)));
+    setSnap(null); setVerdict(null); setErr(null); setDataSources(null);
+    const id = ++reqRef.current;
+    api.snapshot(ticker)
+      .then((s) => { if (reqRef.current === id) setSnap(s); })
+      .catch((e) => { if (reqRef.current === id) setErr(String((e as Error).message ?? e)); });
+    return () => { reqRef.current++; }; // unmount/reticker invalidates in-flight work
   }, [ticker]);
 
   const runResearch = async () => {
+    const id = reqRef.current;
     setBusy(true); setErr(null);
-    try { setVerdict((await api.research(ticker)).verdict); }
-    catch (e) { setErr(String((e as Error).message ?? e)); }
-    finally { setBusy(false); }
+    try {
+      const r = await api.research(ticker);
+      if (reqRef.current === id) {
+        setVerdict(r.verdict);
+        setDataSources(r.data_sources ?? null);
+      }
+    } catch (e) {
+      if (reqRef.current === id) setErr(String((e as Error).message ?? e));
+    } finally {
+      if (reqRef.current === id) setBusy(false);
+    }
   };
 
   const checks = Object.fromEntries((verdict?.level_checks ?? []).map((c) => [c.field, c]));
@@ -103,6 +140,8 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
         </div>
       </div>
 
+      <ExternalProcessingNotice />
+
       {err && <div className="error-text">{err}</div>}
       {!snap && !err && <div className="empty-state">Loading {ticker}…</div>}
 
@@ -110,6 +149,7 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
         <>
           <div className="stat-row">
             <div><span className="stat-label">Price</span><span className="stat-value">{money(snap.quote?.price)}</span></div>
+            <div><span className="stat-label">As of</span><span className="stat-value">{snap.quote?.as_of ? new Date(snap.quote.as_of).toLocaleString() : 'unknown'}</span></div>
             <div><span className="stat-label">20-day SMA</span><span className="stat-value">{money(snap.history?.sma20)}</span></div>
             <div><span className="stat-label">50-day SMA</span><span className="stat-value">{money(snap.history?.sma50)}</span></div>
             <div><span className="stat-label">6-month range</span><span className="stat-value">{money(snap.history?.recent_low)} – {money(snap.history?.recent_high)}</span></div>
@@ -120,7 +160,7 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
             <div className="verdict">
               <div className="verdict-head">
                 <span className="verdict-badge" style={{ color: style.color, borderColor: style.color }}>{style.label}</span>
-                <span className="muted">confidence {verdict.confidence} · {verdict.model}</span>
+                <span className="muted">qualitative confidence: {verdict.confidence} · model {verdict.model} · {new Date(verdict.generated_at).toLocaleString()}</span>
               </div>
               <p className="verdict-summary">{verdict.summary}</p>
 
@@ -141,20 +181,32 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
                   <ul className="tight-list">{verdict.risks.map((r, i) => <li key={i}>{r}</li>)}</ul>
                 </>
               )}
+              {dataSources && (
+                <>
+                  <p className="card-title" style={{ margin: '12px 0 4px' }}>Data available to this research</p>
+                  <ul className="tight-list">
+                    {Object.entries(dataSources).map(([k, s]) => (
+                      <SourceAvail key={k} s={{ ...s, note: SOURCE_LABELS[k] ? `${SOURCE_LABELS[k]}${s.note ? ` — ${s.note}` : ''}` : s.note }} />
+                    ))}
+                  </ul>
+                </>
+              )}
               {verdict.sources.length > 0 && (
                 <>
-                  <p className="card-title" style={{ margin: '12px 0 4px' }}>Sources used</p>
+                  <p className="card-title" style={{ margin: '12px 0 4px' }}>Retrieved references</p>
                   <ul className="tight-list">
                     {verdict.sources.map((sx, i) => (
                       <li key={i}><a href={sx.url} target="_blank" rel="noreferrer noopener">{sx.title}</a></li>
                     ))}
                   </ul>
+                  <p className="provenance">References retrieved during research — not proof that every claim was verified. Confidence is qualitative, not a probability.</p>
                 </>
               )}
               <p className="provenance">
-                <b>verified</b> means the number matches a real anchor in this ticker's own data — an SMA, the
-                6-month range, or the current price. <b>unsupported</b> means it matches nothing supplied; treat it
-                as the model's invention rather than a level. Not advice.
+                <b>anchor match</b> means the number equals a real level in this ticker's own data — an SMA, the
+                6-month range, or the current price. It is an anchor match, NOT a validated prediction.{' '}
+                <b>unsupported</b> means it matches nothing supplied; treat it as the model's invention rather than a
+                level. This is a research hypothesis, not advice.
               </p>
             </div>
           )}
@@ -172,10 +224,6 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
               </ul>
             </>
           )}
-
-          <div style={{ marginTop: 14, borderTop: '1px solid var(--border-soft)', paddingTop: 14 }}>
-            <TradePanel ticker={ticker} price={snap.quote?.price ?? null} earningsInDays={snap.earnings_in_days} />
-          </div>
 
           {snap.fundamentals && (
             <p className="provenance">
@@ -268,7 +316,7 @@ function Insights({ onOpen }: { onOpen: (t: string) => void }) {
           )}
 
           <p className="provenance">
-            {board.notes.join(' ')} Open one and hit <b>Research with AI</b> for a view with levels.
+            {board.notes.join(' ')} Open one and hit <b>Research with AI</b> for a research view with levels.
           </p>
         </>
       )}
@@ -362,9 +410,10 @@ export function OnePage() {
           </div>
         )}
         <p className="provenance">
-          Live exchange data{fetchedAt ? ` as of ${new Date(fetchedAt).toLocaleTimeString()}` : ''}.
-          Each quote carries its own delay; prices are indicative, not a trading feed.
-          Earnings dates marked <b>*</b> are the provider's estimate, not confirmed by the company.
+          Delayed, unofficial market data{fetchedAt ? ` fetched ${new Date(fetchedAt).toLocaleTimeString()}` : ''} from a
+          public endpoint that can change or rate-limit without notice — not a real-time trading feed, and not
+          guaranteed to stay available. Each quote carries its own delay. Earnings dates marked <b>*</b> are the
+          provider's estimate, not confirmed by the company.
         </p>
       </div>
 

@@ -1,9 +1,10 @@
-// Track record: score past verdicts against what the market actually did.
+// Research journal: what the app said, when, against what evidence — enriched
+// with a descriptive price change since the observation.
 //
-// Each logged verdict carries the price at call time. Enriching it with the
-// CURRENT price and time-elapsed turns the log into an answerable question:
-// "was the advice any good?" Directional hit/miss is computed, never judged —
-// a HOLD has no direction and shows as un-scored rather than guessed.
+// This is deliberately NOT a benchmark. Whether advice was "right" cannot be
+// scored from one price point: the entry/exit never traded, the horizon is
+// the model's guess, and a single current quote cannot validate a prediction.
+// So the journal describes; it does not grade. No hit rate, no correct/wrong.
 
 import type { VerdictLogEntry, ScoredVerdict } from './types.js';
 import { getQuotes } from './quotes.js';
@@ -11,8 +12,9 @@ import { getQuotes } from './quotes.js';
 export async function scoreVerdicts(entries: VerdictLogEntry[]): Promise<ScoredVerdict[]> {
   if (entries.length === 0) return [];
   const tickers = [...new Set(entries.map((e) => e.ticker))];
-  const { quotes } = await getQuotes(tickers);
+  const { quotes, failed } = await getQuotes(tickers);
   const priceOf = new Map(quotes.map((q) => [q.ticker, q.price]));
+  const failureOf = new Map(failed.map((f) => [f.ticker, f.reason]));
 
   return entries.map((e) => {
     const now = typeof priceOf.get(e.ticker) === 'number' ? priceOf.get(e.ticker) as number : null;
@@ -21,17 +23,10 @@ export async function scoreVerdicts(entries: VerdictLogEntry[]): Promise<ScoredV
       ? Number((((now - e.price_at_call) / e.price_at_call) * 100).toFixed(2))
       : null;
 
-    // Direction implied by the verdict. HOLD/UNCLEAR are not scored — calling
-    // them right or wrong would be inventing a claim the model did not make.
+    // Direction implied by the verdict's wording, for description only.
     let direction: 'bullish' | 'bearish' | 'neutral' = 'neutral';
     if (e.verdict === 'strong_buy' || e.verdict === 'buy') direction = 'bullish';
     else if (e.verdict === 'avoid') direction = 'bearish';
-
-    const outcome = change_pct === null || direction === 'neutral'
-      ? 'un_scored'
-      : direction === 'bullish'
-        ? (change_pct > 0.5 ? 'correct' : change_pct < -0.5 ? 'wrong' : 'flat')
-        : (change_pct < -0.5 ? 'correct' : change_pct > 0.5 ? 'wrong' : 'flat');
 
     return {
       ...e,
@@ -39,25 +34,26 @@ export async function scoreVerdicts(entries: VerdictLogEntry[]): Promise<ScoredV
       change_pct,
       elapsed_days,
       direction,
-      outcome,
     };
   });
 }
 
 export function summarizeScored(scored: ScoredVerdict[]) {
-  const scoredOnly = scored.filter((s) => s.outcome !== 'un_scored');
-  const correct = scoredOnly.filter((s) => s.outcome === 'correct').length;
-  const avgChange = scoredOnly.length > 0
-    ? Number((scoredOnly.reduce((sum, s) => sum + (s.change_pct ?? 0), 0) / scoredOnly.length).toFixed(2))
+  // Description only: counts, and an average move across entries that carry a
+  // price change. An AVOID entry shows its price change too, but the UI labels
+  // it as a description of what followed the call — never "profitable short",
+  // never a realized return, never a holding period promoted to a strategy.
+  const withChange = scored.filter((s) => s.change_pct !== null);
+  const avgChange = withChange.length > 0
+    ? Number((withChange.reduce((sum, s) => sum + (s.change_pct ?? 0), 0) / withChange.length).toFixed(2))
     : null;
-  const bullish = scoredOnly.filter((s) => s.direction === 'bullish');
+  const bullish = scored.filter((s) => s.direction === 'bullish');
   return {
     total: scored.length,
-    scored: scoredOnly.length,
-    correct,
-    wrong: scoredOnly.filter((s) => s.outcome === 'wrong').length,
-    hit_rate: scoredOnly.length > 0 ? Math.round((correct / scoredOnly.length) * 100) : null,
+    measured: withChange.length,
+    unmeasured: scored.length - withChange.length,
     avg_change_pct: avgChange,
     bullish_count: bullish.length,
+    disclaimer: 'Descriptive only. Price change since observation reflects the whole market move over the elapsed period, not the quality of the call. No outcome scoring, no hit rate, not strategy performance.',
   };
 }
