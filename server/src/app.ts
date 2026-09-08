@@ -349,6 +349,36 @@ export function createApp(): express.Express {
         }
       }
       const fresh = includePortfolio ? portfolioSummary(load()) : undefined;
+      // Live market context: pull quotes/news for any tickers the question
+      // mentions (or the thread's ticker), plus today's top movers, so the
+      // chat reasons over the same live data the rest of the app shows.
+      const questionTickers = [...question.matchAll(/\b[A-Z]{2,5}\b/g)]
+        .map((m) => m[0])
+        .filter((t) => !['BUY', 'SELL', 'HOLD', 'ETF', 'A', 'I', 'LLM', 'API', 'US', 'USD', 'IPO', 'CEO', 'FDA'].includes(t))
+        .slice(0, 5);
+      const focusTickers = [...new Set([...(thread ? [thread] : []), ...questionTickers])].slice(0, 6);
+      let quoteSummary = '';
+      let newsSummary = '';
+      try {
+        const parts: string[] = [];
+        if (focusTickers.length > 0) {
+          const { quotes } = await getQuotes(focusTickers);
+          for (const q of quotes) {
+            let headline = '';
+            try {
+              const n = await getTickerNews(q.ticker, 2);
+              headline = n.news.map((x) => x.title).slice(0, 2).join(' | ');
+            } catch { /* news optional */ }
+            parts.push(`${q.ticker}: $${q.price.toFixed(2)} (${q.previous_close != null ? ((q.price - q.previous_close) / q.previous_close * 100).toFixed(2) : '?'}% today)${headline ? ` — ${headline}` : ''}`);
+          }
+        }
+        const movers = await getMovers('most_actives', 5).catch(() => []);
+        if (movers.length > 0) {
+          parts.push(`Most active today: ${movers.slice(0, 5).map((m) => `${m.ticker} ${m.change_pct != null && m.change_pct >= 0 ? '+' : ''}${m.change_pct != null ? m.change_pct.toFixed(1) : '?'}%`).join(', ')}`);
+        }
+        quoteSummary = parts.join('\n');
+        newsSummary = 'Headlines above are the latest this app could fetch (Yahoo Finance via RSS); they may not be exhaustive.';
+      } catch { /* market context is best-effort */ }
       const ctx = buildStoreContext({ disclosures: [] }, fresh && {
         cash_usd: fresh.cash_usd,
         positions: fresh.positions.map((p) => ({
@@ -357,6 +387,9 @@ export function createApp(): express.Express {
           unrealized_pl_usd: p.unrealized_pl_usd, unrealized_pl_pct: p.unrealized_pl_pct,
         })),
         unrealized_pl_usd: fresh.unrealized_pl_usd,
+      }, {
+        quote_summary: quoteSummary,
+        news_summary: newsSummary,
       });
       const llmRes = await callLlm(cfg, question, ctx);
       if (!llmRes.ok) return fail(res, 502, llmRes.error ?? 'LLM request failed');

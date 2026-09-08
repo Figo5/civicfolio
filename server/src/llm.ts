@@ -84,7 +84,10 @@ export interface PortfolioProjection {
 
 export function buildStoreContext(data: {
   disclosures: { id: string; ticker: string; company: string; owner: string; owner_role: string; tx_type: string; tx_date_min: string; tx_date_max: string; published_date: string; amount_min_usd: number; amount_max_usd: number; amendment: boolean; source_name: string; source_url: string | null; data_mode: string; notes?: string }[];
-}, portfolio?: PortfolioProjection): LlmStoreContext {
+}, portfolio?: PortfolioProjection, market?: {
+  quote_summary: string;
+  news_summary: string;
+}): LlmStoreContext {
   const slim = data.disclosures.map((r) => ({
     id: r.id,
     ticker: r.ticker,
@@ -107,6 +110,11 @@ export function buildStoreContext(data: {
   // explicitly ask a portfolio question. Trade notes and the journal stay local.
   const payload: Record<string, unknown> = { disclosures: slim };
   if (portfolio) payload.paper_portfolio = portfolio;
+  if (market) {
+    // Live market data this app fetched from public endpoints. Timestamped.
+    if (market.quote_summary) payload.live_market = market.quote_summary;
+    if (market.news_summary) payload.recent_headlines = market.news_summary;
+  }
   return {
     dataBlock: JSON.stringify(payload, null, 1),
     supportedRecordIds: slim.map((r) => r.id),
@@ -141,7 +149,7 @@ export function buildSystemPrompt(advisorMode: AdvisorMode = 'advisor'): string 
     'You are Civicfolio\'s personal research assistant for a self-directed investor who executes in their own brokerage.\n' +
     'The user wants straight answers: what looks like a good buy, what looks bad, and why. Give your actual view.\n' +
     'Rules:\n' +
-    '- The <untrusted_local_data> block contains live market data this app fetched (quotes, price history, news) when available. Use it when present.\n' +
+    '- The <untrusted_local_data> block contains live market data this app fetched moments ago (quotes, most-active movers, recent headlines) whenever it could retrieve any. When "live_market" is present, treat those prices as current and USE them — never claim you have no market data while live quotes sit in the block.\n' +
     '- When the block lacks data on a ticker, say so briefly, then answer from your own market knowledge — clearly marking which numbers are approximate or as-of your training data. Do not pretend stale knowledge is current.\n' +
     '- Give concrete, actionable output: a clear view (buy / hold / avoid), reasoning, key risks, and what to watch.\n' +
     '- Cite the DATA block for any figure taken from it. Never present a made-up number as a live quote.\n' +
