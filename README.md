@@ -45,6 +45,43 @@ Every disclosure record carries a `data_mode`:
 
 The sidebar shows the current mode pill, and a data-mode banner is shown above every page.
 
+## Pulling real disclosures
+
+```bash
+node scripts/fetch-disclosures.mjs --days 90          # write a file to review
+node scripts/fetch-disclosures.mjs --days 90 --post   # and import it
+```
+
+Writes `~/.civicfolio/import-<date>.json`, then optionally posts it through the
+normal validated import endpoint. No API key, no account, no fees.
+
+**Provenance chain, stated plainly.** Transactions come from lambdafin.com,
+which parses House Clerk Periodic Transaction Reports. Every row carries
+`ptrLink` — the official House PDF — as its `source_url`, so each record points
+back at the primary document. The parse is a third party's work, not the
+Clerk's, and PTR PDFs are scans, so treat a row as a pointer to the filing
+rather than as verified truth. Open the PDF before acting on anything.
+
+Rows that cannot be represented honestly are **skipped, never guessed**: no
+ticker (bonds, funds, private holdings), an unclassifiable transaction type, or
+a truncated amount range such as `"$100,001 -"`. A typical 90-day pull yields
+~75 importable rows out of 100, and the script prints every skip with its
+reason.
+
+**Why not the official bulk file?** `disclosures-clerk.house.gov` publishes an
+annual ZIP, but it is a filing *index* only — name, state, filing type, date,
+DocID — with no tickers, amounts, or transaction details. Those live in
+individual PDFs that are scanned images, so extracting them means OCR on scans;
+for financial figures that is exactly where you do not want a machine guessing.
+
+**Terms.** The House disclosure site carries a statutory notice: it is unlawful
+to use the information "for (A) any unlawful purpose, (B) any commercial
+purpose, other than by news and communications media for dissemination to the
+general public, (C) determining or establishing the credit rating of any
+individual, or (D) use, directly or indirectly, in the solicitation of money."
+Whether personal investment research is a "commercial purpose" is unsettled.
+This is not legal advice — read the notice and decide for yourself.
+
 ## Importing real data
 
 Use **Disclosures → Import data…** and paste JSON or CSV (or `POST /api/disclosures/import` with `{ kind, text }`). Limits: 5 MB, 5000 records per import. Validation is server-side; invalid rows are rejected with reasons. Duplicate records (same ticker + owner + transaction dates + amount range + amendment flag) are skipped and reported.
