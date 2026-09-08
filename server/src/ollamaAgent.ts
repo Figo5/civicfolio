@@ -581,7 +581,10 @@ export async function runResearchAgent(ctx: AgentContext): Promise<{ ok: true; v
     const verdict = parseVerdict(finalText, ctx.ticker, model, preSearchSources.length, preSearchSources);
     if (verdict) {
       // Attach the URLs actually seen in search results so citations are real.
+      // Seed with the pre-search results (injected into the user turn) — models
+      // that answer directly without tool calls would otherwise cite nothing.
       const seen = new Map<string, string>();
+      for (const r of preSearchSources) if (r.url) seen.set(r.url, r.title);
       for (const m of messages) {
         if (m.role === 'tool' && m.name === 'web_search') {
           try {
