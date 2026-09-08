@@ -172,19 +172,73 @@ export function removeWatchlistItem(data: AppData, id: string): boolean {
   return data.watchlist.length < before;
 }
 
+/**
+ * Record a user-entered mark price for a held ticker so the UI can show
+ * unrealized gain/loss. This is NOT market data — the app has no quote source.
+ * Passing null/0 clears the mark.
+ */
+export function setMark(data: AppData, input: unknown): { ok: boolean; error?: string; portfolio?: PortfolioState } {
+  const body = (input ?? {}) as Record<string, unknown>;
+  const ticker = normalizeTicker(body.ticker);
+  if (!ticker) return { ok: false, error: 'ticker must be 1-10 letters A-Z' };
+  if (!data.portfolio.positions[ticker]) {
+    return { ok: false, error: `no open position in ${ticker}; marks apply to held positions only` };
+  }
+  if (!data.portfolio.marks) data.portfolio.marks = {};
+
+  // null / absent clears the mark rather than storing a meaningless zero.
+  if (body.price === null || body.price === undefined || body.price === '') {
+    delete data.portfolio.marks[ticker];
+    return { ok: true, portfolio: data.portfolio };
+  }
+
+  const price = body.price;
+  if (!isFiniteNumber(price) || (price as number) <= 0) {
+    return { ok: false, error: 'mark price must be a positive finite number' };
+  }
+  if ((price as number) > MAX_PRICE_USD) {
+    return { ok: false, error: `mark price exceeds practical limit (${MAX_PRICE_USD})` };
+  }
+  data.portfolio.marks[ticker] = { price: price as number, marked_at: new Date().toISOString() };
+  return { ok: true, portfolio: data.portfolio };
+}
+
 export function portfolioSummary(data: AppData) {
-  const positions = Object.entries(data.portfolio.positions).map(([ticker, p]) => ({
-    ticker,
-    quantity: p.quantity,
-    cost_basis_usd: p.cost_basis_usd,
-    avg_cost: p.quantity > 0 ? Math.round((p.cost_basis_usd / p.quantity) * 100) / 100 : 0,
-  }));
+  const marks = data.portfolio.marks ?? {};
+  const positions = Object.entries(data.portfolio.positions).map(([ticker, p]) => {
+    const avgCost = p.quantity > 0 ? Math.round((p.cost_basis_usd / p.quantity) * 100) / 100 : 0;
+    const mark = marks[ticker];
+    // Value only where the user actually supplied a mark. No mark -> nulls, so
+    // the UI shows cost basis instead of inventing a number.
+    const marketValue = mark ? round2(mark.price * p.quantity) : null;
+    return {
+      ticker,
+      quantity: p.quantity,
+      cost_basis_usd: p.cost_basis_usd,
+      avg_cost: avgCost,
+      mark_price: mark ? mark.price : null,
+      marked_at: mark ? mark.marked_at : null,
+      market_value_usd: marketValue,
+      unrealized_pl_usd: marketValue === null ? null : round2(marketValue - p.cost_basis_usd),
+      unrealized_pl_pct: marketValue === null || p.cost_basis_usd === 0
+        ? null
+        : Math.round(((marketValue - p.cost_basis_usd) / p.cost_basis_usd) * 1000) / 10,
+    };
+  });
   const totalCost = positions.reduce((s, p) => s + p.cost_basis_usd, 0);
+  const marked = positions.filter((p) => p.market_value_usd !== null);
+  // Marked value counts marked positions at their mark and the rest at cost, so
+  // the total is never a mix of real and imagined numbers without saying so.
+  const markedValue = positions.reduce((s, p) => s + (p.market_value_usd ?? p.cost_basis_usd), 0);
   return {
     cash_usd: data.portfolio.cash_usd,
     positions,
-    invested_cost_usd: Math.round(totalCost * 100) / 100,
-    account_cost_usd: Math.round((totalCost + data.portfolio.cash_usd) * 100) / 100,
+    invested_cost_usd: round2(totalCost),
+    account_cost_usd: round2(totalCost + data.portfolio.cash_usd),
+    marked_positions_count: marked.length,
+    marked_value_usd: marked.length ? round2(markedValue) : null,
+    account_marked_usd: marked.length ? round2(markedValue + data.portfolio.cash_usd) : null,
+    unrealized_pl_usd: marked.length ? round2(markedValue - totalCost) : null,
     trade_count: data.trades.length,
   };
 }

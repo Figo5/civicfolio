@@ -19,7 +19,7 @@ function dataFile(): string {
 }
 
 export function emptyPortfolio(): PortfolioState {
-  return { cash_usd: 100000, positions: {} };
+  return { cash_usd: 100000, positions: {}, marks: {} };
 }
 
 // Demo cash reconciles with the seeded trades (425 + 140.5 = 565.50 spent).
@@ -34,6 +34,8 @@ export function demoData(): AppData {
     portfolio: {
       cash_usd: Math.round((100000 - DEMO_SEED_SPEND) * 100) / 100,
       positions: { ARRX: { quantity: 10, cost_basis_usd: 425 }, CYPW: { quantity: 5, cost_basis_usd: 140.5 } },
+      // Present so in-memory demo state matches what a disk round-trip returns.
+      marks: {},
     },
     chat: [],
     meta: {
@@ -79,7 +81,17 @@ function sanitizePortfolio(p: unknown): PortfolioState {
       }
     }
   }
-  return { cash_usd: cash, positions };
+  const marks: NonNullable<PortfolioState['marks']> = {};
+  if (obj.marks && typeof obj.marks === 'object') {
+    for (const [ticker, v] of Object.entries(obj.marks as Record<string, unknown>)) {
+      if (!v || typeof v !== 'object') continue;
+      const mv = v as Record<string, unknown>;
+      if (isFiniteNumber(mv.price) && (mv.price as number) > 0 && typeof mv.marked_at === 'string') {
+        marks[String(ticker).toUpperCase().slice(0, 12)] = { price: mv.price as number, marked_at: mv.marked_at };
+      }
+    }
+  }
+  return { cash_usd: cash, positions, marks };
 }
 
 export function load(): AppData {
@@ -144,13 +156,52 @@ export function update<T>(mutate: (draft: AppData) => { committed: boolean; valu
   return outcome.value;
 }
 
+/**
+ * Copy the current data file aside before a destructive reset. Resets replace
+ * the whole store, so this is the only thing standing between a mis-clicked
+ * confirmation and losing real imported data. Best-effort: a backup failure
+ * must not block the reset the user asked for.
+ * Returns the backup path, or null if there was nothing to back up.
+ */
+export function backupBeforeReset(reason: string): string | null {
+  const file = dataFile();
+  try {
+    if (!fs.existsSync(file)) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const dest = path.join(dataDir(), `backup-${stamp}-${reason}.json`);
+    fs.copyFileSync(file, dest);
+    pruneBackups();
+    return dest;
+  } catch (err) {
+    console.error('[civicfolio] backup before reset failed (continuing):', err);
+    return null;
+  }
+}
+
+// Keep the 10 most recent backups; this is a personal app, not an archive.
+const MAX_BACKUPS = 10;
+function pruneBackups(): void {
+  try {
+    const dir = dataDir();
+    const backups = fs.readdirSync(dir)
+      .filter((f) => f.startsWith('backup-') && f.endsWith('.json'))
+      .sort()
+      .reverse();
+    for (const stale of backups.slice(MAX_BACKUPS)) {
+      fs.unlinkSync(path.join(dir, stale));
+    }
+  } catch { /* pruning is best-effort */ }
+}
+
 export function resetDemo(): AppData {
+  backupBeforeReset('before-demo-load');
   const data = demoData();
   save(data);
   return data;
 }
 
 export function resetEmpty(): AppData {
+  backupBeforeReset('before-clear');
   const data = emptyData();
   save(data);
   return data;

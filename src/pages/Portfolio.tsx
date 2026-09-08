@@ -9,6 +9,7 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
   const [error, setError] = useState<string | null>(null);
   const [okMsg, setOkMsg] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [markError, setMarkError] = useState<string | null>(null);
 
   const loadAll = () => {
     api.portfolio().then(setPortfolio).catch((e) => setError(String((e as Error).message ?? e)));
@@ -54,6 +55,23 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
     }
   };
 
+  const saveMark = async (ticker: string, raw: string, previous: number | null) => {
+    const trimmed = raw.trim();
+    const parsed = trimmed === '' ? null : Number(trimmed);
+    if (parsed !== null && (Number.isNaN(parsed) || parsed <= 0)) {
+      setMarkError(`Mark for ${ticker} must be a positive number.`);
+      return;
+    }
+    if (parsed === previous) return; // nothing changed; skip the round trip
+    setMarkError(null);
+    try {
+      const res = await api.setMark(ticker, parsed);
+      setPortfolio(res.portfolio);
+    } catch (e) {
+      setMarkError(String((e as Error).message ?? e));
+    }
+  };
+
   const overSpendWarning = form.side === 'BUY' && cashAfter !== null && cashAfter < 0;
 
   return (
@@ -76,8 +94,16 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
           <Stat label="Cost basis of open positions" value={portfolio ? fmtUsd(portfolio.invested_cost_usd) : '—'} sub={`${portfolio?.positions.length ?? 0} open position(s)`} />
         </div>
         <div className="card">
-          <p className="card-title">Trades</p>
-          <Stat label="Journal entries" value={String(portfolio?.trade_count ?? '—')} sub="persisted locally across restarts" />
+          <p className="card-title">Unrealized</p>
+          <Stat
+            label={portfolio && portfolio.marked_positions_count > 0 ? 'Gain/loss vs cost basis' : 'Gain/loss'}
+            value={portfolio?.unrealized_pl_usd == null
+              ? '—'
+              : `${portfolio.unrealized_pl_usd >= 0 ? '+' : ''}${fmtUsd(portfolio.unrealized_pl_usd)}`}
+            sub={portfolio?.unrealized_pl_usd == null
+              ? 'set a mark price below to compute'
+              : `from ${portfolio.marked_positions_count} marked position(s) — your marks, not quotes`}
+          />
         </div>
       </div>
 
@@ -141,8 +167,12 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
         {!portfolio || portfolio.positions.length === 0 ? (
           <div className="empty-state">No open positions.</div>
         ) : (
+          <>
           <table className="table">
-            <thead><tr><th>Ticker</th><th className="num">Quantity</th><th className="num">Avg cost</th><th className="num">Cost basis</th></tr></thead>
+            <thead><tr>
+              <th>Ticker</th><th className="num">Quantity</th><th className="num">Avg cost</th><th className="num">Cost basis</th>
+              <th className="num">Your mark</th><th className="num">Value</th><th className="num">Unrealized</th>
+            </tr></thead>
             <tbody>
               {portfolio.positions.map((p) => (
                 <tr key={p.ticker}>
@@ -150,10 +180,35 @@ export function PortfolioPage({ refreshMeta }: { refreshMeta: () => Promise<void
                   <td className="num">{p.quantity}</td>
                   <td className="num">{fmtUsd(p.avg_cost)}</td>
                   <td className="num">{fmtUsd(p.cost_basis_usd)}</td>
+                  <td className="num">
+                    <input
+                      className="mark-input"
+                      inputMode="decimal"
+                      placeholder="—"
+                      aria-label={`Mark price for ${p.ticker}`}
+                      defaultValue={p.mark_price ?? ''}
+                      onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+                      onBlur={(e) => saveMark(p.ticker, e.target.value, p.mark_price)}
+                    />
+                  </td>
+                  <td className="num">{p.market_value_usd === null ? <span className="muted">no mark</span> : fmtUsd(p.market_value_usd)}</td>
+                  <td className={`num ${p.unrealized_pl_usd === null ? '' : p.unrealized_pl_usd >= 0 ? 'pl-up' : 'pl-down'}`}>
+                    {p.unrealized_pl_usd === null
+                      ? <span className="muted">—</span>
+                      : `${p.unrealized_pl_usd >= 0 ? '+' : ''}${fmtUsd(p.unrealized_pl_usd)} (${p.unrealized_pl_pct! >= 0 ? '+' : ''}${p.unrealized_pl_pct}%)`}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <p className="provenance">
+            <strong>Your mark</strong> is a price you type in yourself — this app has no market data feed and never fetches quotes.
+            Unrealized figures are derived from your marks, so they are only as current as the last value you entered.
+            {portfolio.marked_positions_count > 0 && portfolio.marked_positions_count < portfolio.positions.length
+              && ' Unmarked positions are counted at cost basis in the account total.'}
+          </p>
+          {markError && <div className="error-text">{markError}</div>}
+          </>
         )}
       </div>
 

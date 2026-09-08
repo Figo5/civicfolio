@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { load, update, save, resetDemo, resetEmpty, dataDir } from './store.js';
 import { answerQuestion } from './research.js';
-import { submitTrade, addIdea, addWatchlistItem, removeIdea, removeWatchlistItem, portfolioSummary } from './portfolio.js';
+import { submitTrade, setMark, addIdea, addWatchlistItem, removeIdea, removeWatchlistItem, portfolioSummary } from './portfolio.js';
 import { runImport, dedupeRecords } from './importAdapter.js';
 import { getLlmConfig, callLlm, buildStoreContext } from './llm.js';
 import { cleanText } from './validate.js';
@@ -255,6 +255,16 @@ export function createApp(): express.Express {
     if (!result.ok) return fail(res, 400, result.error ?? 'invalid trade');
     res.json({ trade: result.trade, portfolio: portfolioSummary(load()), duplicate: result.duplicate === true });
   });
+  // Mark prices: user-entered valuations for held positions. Not market data.
+  app.post('/api/portfolio/marks', (req, res) => {
+    const out = update<{ status: number; body: unknown }>((draft) => {
+      const result = setMark(draft, req.body);
+      if (!result.ok) return { committed: false, value: { status: 400, body: { error: result.error ?? 'invalid mark' } } };
+      return { committed: true, value: { status: 200, body: { portfolio: portfolioSummary(draft) } } };
+    });
+    res.status(out.status).json(out.body);
+  });
+
   // ---- import ----
   app.post('/api/disclosures/import', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;

@@ -53,9 +53,19 @@ export interface PaperTrade {
   note?: string;
 }
 
+// A price YOU typed in for a position you hold, so the app can show unrealized
+// gain/loss. Never a quote: no market data source exists in this app.
+export interface MarkPrice {
+  price: number; // finite, > 0, user-entered
+  marked_at: string; // ISO datetime the value was entered
+}
+
 export interface PortfolioState {
   cash_usd: number;
   positions: Record<string, { quantity: number; cost_basis_usd: number }>;
+  // ticker -> user-entered mark. Absent means "no mark set"; the UI then shows
+  // cost basis only rather than inventing a value.
+  marks?: Record<string, MarkPrice>;
 }
 
 export interface ChatCitation {

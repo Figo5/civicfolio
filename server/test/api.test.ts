@@ -520,3 +520,68 @@ test('malformed JSON body rejected', async () => {
 after(() => {
   try { fs.rmSync(testDir, { recursive: true, force: true }); } catch { /* best effort */ }
 });
+
+test('mark prices: set, compute unrealized P&L, reject junk, clear, persist', async () => {
+  await postJson('/api/demo/clear');
+  await postJson('/api/portfolio/trades', {
+    ticker: 'ARRX', side: 'BUY', quantity: 10, price: 50, price_source: 'user_entered',
+    trade_date: '2026-09-01', client_request_id: 'mark-test-1',
+  });
+
+  // No mark yet -> value/P&L stay null rather than defaulting to cost basis.
+  const before = await agent().get('/api/portfolio');
+  assert.equal(before.body.positions[0].mark_price, null);
+  assert.equal(before.body.positions[0].market_value_usd, null);
+  assert.equal(before.body.unrealized_pl_usd, null);
+  assert.equal(before.body.marked_positions_count, 0);
+
+  // Mark at 62.50 -> value 625, cost 500, +125 (+25%).
+  const set = await postJson('/api/portfolio/marks', { ticker: 'ARRX', price: 62.5 });
+  assert.equal(set.status, 200);
+  const pos = set.body.portfolio.positions[0];
+  assert.equal(pos.mark_price, 62.5);
+  assert.equal(pos.market_value_usd, 625);
+  assert.equal(pos.unrealized_pl_usd, 125);
+  assert.equal(pos.unrealized_pl_pct, 25);
+  assert.equal(set.body.portfolio.unrealized_pl_usd, 125);
+  assert.ok(pos.marked_at, 'mark records when it was entered');
+
+  // Cost-basis totals must be unaffected by marking.
+  assert.equal(set.body.portfolio.invested_cost_usd, 500);
+
+  // Junk and out-of-range values are rejected.
+  for (const bad of [0, -5, 'abc', true, 1e12]) {
+    const r = await postJson('/api/portfolio/marks', { ticker: 'ARRX', price: bad });
+    assert.equal(r.status, 400, `price ${String(bad)} must be rejected`);
+  }
+  // Marking a ticker you do not hold is rejected.
+  const nohold = await postJson('/api/portfolio/marks', { ticker: 'ZZZZ', price: 10 });
+  assert.equal(nohold.status, 400);
+
+  // Mark survives a restart (reload from disk).
+  resetCacheForTests();
+  const reloaded = await agent().get('/api/portfolio');
+  assert.equal(reloaded.body.positions[0].mark_price, 62.5);
+
+  // Null clears the mark and P&L goes back to null, not zero.
+  const cleared = await postJson('/api/portfolio/marks', { ticker: 'ARRX', price: null });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.portfolio.positions[0].mark_price, null);
+  assert.equal(cleared.body.portfolio.unrealized_pl_usd, null);
+});
+
+test('destructive resets back up the previous store first', async () => {
+  await postJson('/api/demo/load');
+  const dir = dataDir();
+  const countBackups = () => fs.readdirSync(dir).filter((f) => f.startsWith('backup-') && f.endsWith('.json')).length;
+  // Clearing must leave a recoverable copy of what was there.
+  const cleared = await postJson('/api/demo/clear');
+  assert.equal(cleared.status, 200);
+  assert.ok(countBackups() > 0, 'clear writes a backup');
+  assert.ok(countBackups() <= 10, 'old backups are pruned to the cap');
+
+  const newest = fs.readdirSync(dir).filter((f) => f.startsWith('backup-')).sort().reverse()[0];
+  const restored = JSON.parse(fs.readFileSync(path.join(dir, newest), 'utf8'));
+  assert.equal(restored.disclosures.length, 12, 'backup holds the pre-clear data, not the cleared store');
+  assert.equal(load().disclosures.length, 0, 'the live store really is cleared');
+});

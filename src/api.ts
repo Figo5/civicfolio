@@ -58,9 +58,18 @@ export interface ChatMessage {
 
 export interface PortfolioSummary {
   cash_usd: number;
-  positions: { ticker: string; quantity: number; cost_basis_usd: number; avg_cost: number }[];
+  positions: {
+    ticker: string; quantity: number; cost_basis_usd: number; avg_cost: number;
+    // Mark fields are null until you enter a mark price yourself.
+    mark_price: number | null; marked_at: string | null;
+    market_value_usd: number | null; unrealized_pl_usd: number | null; unrealized_pl_pct: number | null;
+  }[];
   invested_cost_usd: number;
   account_cost_usd: number;
+  marked_positions_count: number;
+  marked_value_usd: number | null;
+  account_marked_usd: number | null;
+  unrealized_pl_usd: number | null;
   trade_count: number;
 }
 
@@ -111,6 +120,8 @@ export const api = {
   ask: (question: string, mode: 'deterministic' | 'llm') => post<{ message: ChatMessage }>('/api/chat', { question, mode }),
   portfolio: () => get<PortfolioSummary>('/api/portfolio'),
   trades: () => get<{ trades: PaperTrade[] }>('/api/portfolio/trades'),
+  setMark: (ticker: string, price: number | null) =>
+    post<{ portfolio: PortfolioSummary }>('/api/portfolio/marks', { ticker, price }),
   submitTrade: (t: { ticker: string; side: 'BUY' | 'SELL'; quantity: number; price: number; price_source: string; trade_date: string; note?: string; client_request_id?: string }) =>
     post<{ trade: PaperTrade; portfolio: PortfolioSummary; duplicate?: boolean }>('/api/portfolio/trades', t),
   importDisclosures: (text: string, kind: 'json' | 'csv') =>
