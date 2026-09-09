@@ -1,6 +1,50 @@
 # Civicfolio — HANDOFF
 
-Date: 2026-09-08. Milestone: **research-only product** (brokerage integration removed). Workers: Codex (started, hit usage limit mid-pass) + GLM (completion). Coordinator: Astra.
+## 2026-09-09 — AI paper-fund repair (commit `21939e7`)
+
+**Coordinator:** deepseek-v4-flash (ollama-cloud) — routed intentionally. **Impl:** glm-5.3-flash (ollama-cloud). **Independent review:** glm-5.3-flash.
+
+URL: **http://127.0.0.1:8787** · Restart: `launchctl kickstart -k gui/$(id -u)/local.civicfolio` · Logs: `~/.civicfolio/server.log`.
+
+### Root causes
+1. **No persistent run record** — `runFundLoop` had no coordinator/history; lastRun was component-local, so scheduled runs were invisible in the UI.
+2. **Stale marks** — `ai_fund.marks` updated only on buy; holding passes never re-quoted, so `/api/fund` returned stale equity/P&L.
+3. **Broad regex triggered executions** — a `run the fund` regex in chat could fire on "Did you run the fund?" / "Don't run the fund", and chat had no fund snapshot.
+
+### What changed / files
+- **New** `server/src/fundRuns.ts` — guarded coordinator (single-flight + `request_id` idempotency); persists run as `running` before long ops, finalizes via try/finally to completed/partial/failed; `finalizeInterruptedRuns` marks abandoned `running`→`interrupted` on restart, no replay; bounded ≤200 runs.
+- **New** `server/src/fundChat.ts` — strict intent classifier (run vs status/why); read-only `fundStatusAnswer` snapshot; `fundExplainAnswer`.
+- **New** `server/src/fundLogImport.ts` — imports `~/.civicfolio/fund.log` as `imported:true` summary records (only what the log states).
+- **New** `server/src/clock.ts` — injectable clock seam.
+- **New** `server/test/fundRepair.test.ts` — 53 tests.
+- **Modified** `store.ts` (schema v2→v3 migration, mark objects), `types.ts` (`AiFundMark`/`AiFundRun`), `aiFund.ts` (`refreshFundMarks` separate from trading, `effectiveMark`/`marksAreStale`, realized/unrealized distinct), `fundLoop.ts` (delegates to coordinator, marking pass), `app.ts` (`/api/fund` + `marks_stale`+`runs`+`last_run`+`running_run`+`next_scheduled_run`; `POST /api/fund/marks/refresh` valuation-only; chat intent wired; "AI" excluded from ticker extraction), `market.ts` (`getMoversStrict`), `research.ts` (deterministic fund-status answers), `scripts/run-fund.mjs` (sends `trigger` + `request_id`), `src/api.ts` + `src/pages/AiFund.tsx` (run-list/status/next-run/freshness/Refresh-marks, visibility-gated polling).
+
+### Tests / results (all run by coordinator, not just worker)
+- `npm test` **94/94 pass** (41 existing + 53 new). `npm run typecheck` clean. `npm run build` clean. `npm run smoke` all pass. No CI configured in repo (private) — cannot report CI for the exact SHA.
+- **Initial impl had a test-hermeticity defect** (loop tests hit real Yahoo/SEC without a fetch mock). Fixed in test alone (mockQuietMarket) — reviewer's only blocker; product code was deploy-ready. 94/94 still pass after fix.
+- Migration verified against a **copy of the live v2 store**: marks `104.47`→`{price:104.47, quote_as_of:null, fetched_at:null, source:'trade'}` (price kept, timestamps honestly null), INTC 3.671 + 1 trade + cash 9616.49 + equity $10k all preserved.
+
+### Live verification (post-deploy)
+- Service restarted via launchd kickstart; `/api/fund` now serves new fields; **on-disk live store migrated v2→v3** with data intact.
+- Historical import ran: 5 `fund.log` days marked `imported:true` (e.g. 17:30Z "INTC hold, GRAB no-trade", equity $10k) — honest summaries, not reconstructed.
+- **Natural scheduled run caught during task**: 18:30Z (14:30 ET) run recorded `completed`, INTC **mark refreshed** (equity $10,000→$10,004.09, proving staleness fixed), INTC `hold` (min-hold 0.9d), GRAB `no-trade`. No real trades.
+- Chat verified live: "what did the fund do today?"/"did you run the fund"/"don't run the fund"/"why is the fund holding INTC?" → all **read-only** snapshots, runs stayed at 5 (no execution); explicit "run the fund" executes (tested hermetically).
+
+### Data preservation
+All pre-existing fund data intact: INTC 3.671 @ 104.47, stop 50, cash $9616.49, 1 historical buy trade, lessons none, chat empty (post-deploy status queries added 2 general-thread messages). Backup at `~/.civicfolio/civicfolio-data.json.pre-repair-20260909-132808`.
+
+### Scheduler status
+`local.civicfolio.fund` **untouched** — 8 daily CLOCK times (09:35,10:30,11:30,12:30,13:30,14:30,15:30,15:50 ET). It fires on weekends and market holidays — **NOT trading-day aware**. This is surfaced honestly in the API (`next_scheduled_run.note`) and UI, not mislabeled as a trading calendar. No duplicate scheduler created. Brokerage stays disabled.
+
+### Remaining limitations
+- Marks lack a freshness timestamp for the pre-migration mark (quote time unknown) — honest, shown in UI.
+- The scheduler is clock-based (not trading-day aware) by design; converting to a market-calendar would be a separate, larger change.
+- No CI workflow exists to report.
+- `runFundLoop`'s `quoteProvider` option is declared but wired only via the module test seam (documented in code); tests use the fetch mock instead.
+
+---
+
+## 2026-09-08 — research-only milestone (below)
 
 **No commits/push yet — Astra reviews, runs the UI, and commits.**
 
