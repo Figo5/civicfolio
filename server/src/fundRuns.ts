@@ -42,7 +42,6 @@ export function finalizeInterruptedRuns(clock: Clock = systemClock): number {
 
 interface ActiveRun {
   run: AiFundRun;
-  promise: Promise<{ run: AiFundRun; error?: string }>;
 }
 let active: ActiveRun | null = null;
 
@@ -120,7 +119,14 @@ export function startFundRun(
   });
 
   const mutable: AiFundRun = { ...created, actions: [], failures: [] };
+  // Set `active` as the FIRST synchronous statement of the wrapper, before the
+  // try block. If a body threw synchronously, the wrapper's `finally`
+  // (`active = null`) would run BEFORE an outer `active` assignment re-set it,
+  // wedging the coordinator into `reused:true` forever. Setting it here (before
+  // `await body`) means a sync-throwing body still leaves it set, and `finally`
+  // clears the same slot.
   const promise = (async (): Promise<{ run: AiFundRun; error?: string }> => {
+    active = { run: mutable };
     let bodyError: string | undefined;
     try {
       await body({
@@ -156,6 +162,5 @@ export function startFundRun(
     return { run: { ...mutable, actions: [...mutable.actions], failures: [...mutable.failures] }, error: bodyError };
   })();
 
-  active = { run: mutable, promise };
   return promise.then((r) => ({ reused: false, run: r.run, error: r.error }));
 }

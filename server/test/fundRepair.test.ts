@@ -346,6 +346,22 @@ describe('guarded coordinator', () => {
     }
   });
 
+  test('sync-throwing body does NOT wedge the single-flight coordinator', async () => {
+    // Regression: the active-run slot must be set before the async wrapper's
+    // try block. If it were set after, a body that throws SYNCHRONOUSLY would
+    // clear `active` in `finally` before the outer assignment re-set it, so a
+    // later request would be mis-rejected as `reused:true` forever.
+    resetFundData();
+    // A body that throws before any `await` (synchronous throw).
+    const syncThrow = () => { throw new Error('sync boom'); };
+    const first = await startFundRun('manual', syncThrow, {});
+    assert.equal(first.run.status, 'failed', 'sync throw -> failed run');
+    // A subsequent real request must NOT be told a run is already active.
+    const after = await startFundRun('manual', async () => {}, {});
+    assert.equal(after.reused, false, 'coordinator not wedged (fresh run starts)');
+    assert.equal(after.run.status, 'completed');
+  });
+
   test('interrupted-run recovery: abandoned running -> interrupted on restart, no replay', async () => {
     resetFundData();
     // Simulate an abandoned run: a 'running' record in the store whose process died.

@@ -19,10 +19,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Tests (hermetic, mocked providers, isolated temp store)
-        # The suite never contacts live market/financial providers, needs no
-        # secrets, does not read ~/.civicfolio, and does not start the fund
-        # scheduler. All quote/model/fetch calls are mocked.
+      - name: Tests
+        # The AI-fund repair suite (server/test/fundRepair.test.ts) is fully
+        # hermetic: quotes injected via provider seam / fetch mock, isolated
+        # temp store, no secrets, no ~/.civicfolio access, no scheduler.
+        # NOTE: the pre-existing server/test/api.test.ts makes a small number
+        # of live provider fetches (Yahoo/SEC/DDG) that tolerate failure
+        # (asserts 200 or an explicit error); on a fully network-isolated
+        # runner those tests would fail. It is tracked separately.
         run: npm test
 
       - name: Typecheck
