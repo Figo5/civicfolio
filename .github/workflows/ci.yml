@@ -26,7 +26,7 @@ jobs:
         # NOTE: the pre-existing server/test/api.test.ts makes a small number
         # of live provider fetches (Yahoo/SEC/DDG) that tolerate failure
         # (asserts 200 or an explicit error); on a fully network-isolated
-        # runner those tests would fail. It is tracked separately.
+        # runner one api.test.ts case would fail (503). It is tracked apart.
         run: npm test
 
       - name: Typecheck

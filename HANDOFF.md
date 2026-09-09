@@ -1,5 +1,41 @@
 # Civicfolio — HANDOFF
 
+## 2026-09-09 — Operational baseline / independent audit (HARDENED, commits `0491048`,`fca95ea`,`2c0b5a9`)
+
+Verification of the AI-fund repair (below), via live app + browser, isolated failure suites, and CI.
+
+**Coordinator:** deepseek-v4-flash (ollama-cloud). **Independent reviewers:** glm-5.3-flash (ollama-cloud) ×2.
+
+### Live state verified (HEAD `2c0b5a9` = origin; clean tree; app restarted on it)
+- Dashboard (browser DOM, not bundle strings): equity **$10,004.09**, cash **$9,616.49**, realized $0 / unrealized +$4.09, INTC 3.671 @ mark **$105.59** with freshness "quote 09-09 18:30 · yahoo"; "last run completed 09-09 18:30 (scheduled)"; next run 03:30 PM with honest clock-based disclaimer; run history (1 native + 5 imported). API↔UI values match exactly.
+- **Chat read-only**, all 4 questions ("what did the fund do today?", "did you run the fund?", "don't run the fund.", "why is the fund holding INTC?"): deterministic snapshots (`model_used=null`, no external model), recorded evidence only (INTC cost + the actual 2026-09-08 buy rationale), **run IDs byte-identical before/after** — no chat-triggered execution. Thread persistence correct (all in general thread, no bleed).
+- **Naturally observed scheduled run** (18:30Z/14:30 ET) `c6486c0d`: `scheduled`/`completed`, mark refreshed → equity $10,004.09, INTC hold (min-hold), GRAB no-trade, no real trades. Matches fund.log and dashboard.
+- **Imported vs native distinguishable**: native = UUID; imported = `imported-*` ids + `imported:true`, no fabricated detail.
+
+### Verification found + fixed
+- **Coordinator sync-throw wedge (fixed in `2c0b5a9`)**: `startFundRun` set `active` after the async IIFE launched; a body that threw synchronously cleared `active` in `finally` before the outer assignment re-set it ⇒ every later request mis-returned `reused:true`. Fixed (set `active` first, removed dead outer assignment + `ActiveRun.promise`). Added regression test: sync-throw → `failed`, then a real run starts fresh. **95/95 tests pass** (was 94). Independently APPROVED (`2c0b5a9`); the regression test was empirically verified to fail on the pre-fix code (wedge symptom) and pass on the fix.
+- **CI comment honesty**: previously claimed the whole suite is hermetic; pre-existing `api.test.ts` makes ~19 failure-tolerant live fetches. Comment corrected; CI itself runs test/typecheck/build hermetic for the repair suite.
+
+### CI
+Added `.github/workflows/ci.yml` (Node 22, `npm ci` + lockfile, install→test→typecheck→build, no secrets/`~/.civicfolio`/scheduler). **Verified successes on pushed SHAs**: `fca95ea` (run 34390446084) and `2c0b5a9` (run 34391569882), both 25–31s.
+
+### Checks (coordinator-run)
+- `npm test` **95/95** (41 pre-existing + 53 repair + 1 regression); `npm run typecheck` clean; `npm run build` clean; `npm run smoke` all pass (repair baseline, before hardening).
+- Live store migrated v2→v3 intact: INTC 3.671 @ 104.47, 1 buy, cash 9616.49, equity intact. Run history preserved; scheduler plist untouched (8 clock times, not trading-day aware).
+
+### Pending / limitations
+- `api.test.ts` still makes failure-tolerant live provider fetches (pre-existing; not part of CI's hermetic claim). A fully network-isolated runner would fail it (503). Fix separately if wanted.
+- `persistFundChat`/`stripFundNoiseTickers` exports, always-true `|| true` in a test seed, and unwired `RunFundOptions.quoteProvider` are latent nits only (reviewer-listed; no behavior impact).
+- No market-calendar awareness in the scheduler by design.
+
+### Next-day acceptance checklist
+1. Open `http://127.0.0.1:8787` → AiFund card shows equity, INTC mark w/ real quote time, run history.
+2. Ask chat "what did the fund do today?" → read-only snapshot; run IDs unchanged after.
+3. Watch one scheduled run; confirm its id/trigger/status/valuation agree between dashboard, `/api/fund`, and fund.log.
+4. If equity/pos looks stale >1 scheduled run: check `marks_stale` in `/api/fund`.
+
+---
+
 ## 2026-09-09 — AI paper-fund repair (commit `21939e7`)
 
 **Coordinator:** deepseek-v4-flash (ollama-cloud) — routed intentionally. **Impl:** glm-5.3-flash (ollama-cloud). **Independent review:** glm-5.3-flash.
