@@ -12,6 +12,7 @@
 import type { AppData, ChatCitation } from './types.js';
 import { getQuotes } from './quotes.js';
 import { buildInsights } from './insights.js';
+import { classifyFundIntent, fundStatusAnswer, fundExplainAnswer } from './fundChat.js';
 
 export interface EngineAnswer {
   content: string;
@@ -49,6 +50,22 @@ const STOPWORDS = new Set([
 
 export async function answerQuestion(question: string, data: AppData, threadTicker?: string): Promise<EngineAnswer> {
   const q = question.toLowerCase();
+
+  // ---- fund status (deterministic, read-only) -----------------------------
+  // Even with no model configured, "how is the fund doing?" deserves the
+  // stored snapshot. The classifier is strict: only status-shaped questions
+  // land here; an execution request is refused with guidance (the
+  // deterministic engine cannot run the loop).
+  if (classifyFundIntent(question) === 'status') {
+    const whyMatch = /\bwhy\b[\s\S]{0,40}\b(holding|hold|bought|buy)\b[\s\S]{0,20}\b([A-Z]{1,10})\b/i.exec(question.toUpperCase());
+    const explain = whyMatch ? fundExplainAnswer(data, whyMatch[2].toUpperCase()) : null;
+    return answer(explain ?? fundStatusAnswer(data));
+  }
+  if (classifyFundIntent(question) === 'run') {
+    return answer(
+      'I can answer questions about the paper fund, but running it needs the AI mode (flip the chat toggle to LLM) or the Run-the-fund button on the AI fund card — this deterministic engine never executes the loop.',
+    );
+  }
 
   // Explicit refusal: prediction is not something arithmetic can supply.
   if (/(will .* go (up|down)|forecast|predict|price target|probability|guarantee)/.test(q)) {

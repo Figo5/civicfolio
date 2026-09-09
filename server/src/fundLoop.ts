@@ -11,11 +11,13 @@ import { randomUUID } from 'node:crypto';
 import type { AppData, VerdictLogEntry } from './types.js';
 import type { AgentVerdict } from './ollamaAgent.js';
 import { getQuotes } from './quotes.js';
-import { getMovers, getPriceHistory, getTickerNews } from './market.js';
+import { getMovers, getMoversStrict, getPriceHistory, getTickerNews } from './market.js';
 import { getFundamentals } from './fundamentals.js';
 import { runResearchAgent, getAgentConfig } from './ollamaAgent.js';
-import { planTradeFromVerdict, executeAiTrade, fundEquity, lessonsBlock, daysSince, lastSellOf, MIN_HOLD_DAYS, REBUY_COOLDOWN_DAYS, type PlannedTrade } from './aiFund.js';
+import { planTradeFromVerdict, executeAiTrade, fundEquity, lessonsBlock, daysSince, lastSellOf, refreshFundMarks, marksAreStale, MIN_HOLD_DAYS, REBUY_COOLDOWN_DAYS, type PlannedTrade } from './aiFund.js';
 import { update, load } from './store.js';
+import { startFundRun, activeRun, finalizeInterruptedRuns } from './fundRuns.js';
+import type { AiFundRun, AiFundRunAction } from './types.js';
 
 const MAX_OPEN_POSITIONS = 6;
 
@@ -25,41 +27,93 @@ interface LoopResult {
   equity_usd: number;
 }
 
-interface ResearchOutcome {
-  id: string;
-  verdict: string;
-  confidence: string;
-  summary: string;
-  stop_loss: string | null;
+export interface RunFundOptions {
+  trigger?: AiFundRun['trigger'];
+  requestId?: string;
+  /** Injectable quote provider (tests). Default: real getQuotes. */
+  quoteProvider?: typeof getQuotes;
 }
 
-/** One full pass of the fund. Safe to call repeatedly; every guard is idempotent. */
-export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | { ok: false; error: string }> {
+export interface RunFundOutcome {
+  reused: boolean; // an existing run was returned instead of executing a new one
+  result: LoopResult;
+  run: AiFundRun; // the full durable record
+  error?: string;
+}
+
+/**
+ * One full pass of the fund, through the shared guarded coordinator. Safe to
+ * call repeatedly; concurrent calls share one execution (reused:true), and the
+ * pass is durably recorded from 'running' through finalize (completed /
+ * partial / failed / interrupted) in ai_fund.runs.
+ */
+export async function runFundLoop(opts: RunFundOptions = {}): Promise<RunFundOutcome> {
+  const outcome = await startFundRun(opts.trigger ?? 'manual', (ctx) => loopBody(ctx), {
+    requestId: opts.requestId,
+  });
+  const lastAt = outcome.run.finished_at ?? outcome.run.started_at;
+  return {
+    reused: outcome.reused,
+    result: {
+      ran_at: lastAt,
+      actions: outcome.run.actions,
+      equity_usd: outcome.run.equity_usd ?? Number(fundEquity(load()).toFixed(2)),
+    },
+    run: outcome.run,
+    ...(outcome.error ? { error: outcome.error } : {}),
+  };
+}
+
+interface LoopCtx {
+  addActions: (a: AiFundRunAction[]) => void;
+  addFailures: (f: { kind: string; note: string }[]) => void;
+  setModel: (m: string | null) => void;
+  recordTrades: (n: number) => void;
+}
+
+/** The actual research -> decide -> execute -> reflect pass. */
+async function loopBody(ctx: LoopCtx): Promise<void> {
   const cfg = getAgentConfig();
-  if (!cfg.enabled) return { ok: false, error: 'no model transport available' };
+  ctx.setModel(cfg.model ?? null);
+  if (!cfg.enabled) {
+    ctx.addFailures([{ kind: 'model', note: 'no model transport available' }]);
+    throw new Error('no model transport available');
+  }
+
+  // ---- 0. Marking pass: refresh marks for held positions (no trading) -----
+  const markRes = await refreshFundMarks();
+  for (const f of markRes.failed) {
+    ctx.addFailures([{ kind: 'data', note: `quote unavailable for ${f.ticker}: ${f.reason} (last mark retained, labelled stale)` }]);
+    ctx.addActions([{ ticker: f.ticker, action: 'mark-failed', detail: `quote unavailable: ${f.reason} — previous mark retained as stale` }]);
+  }
+  if (markRes.updated.length > 0) {
+    ctx.addActions(markRes.updated.map((t) => ({ ticker: t, action: 'mark', detail: `mark refreshed (${markRes.fetched_at})` })));
+  }
 
   const before = load();
   const lessons = before.ai_lessons;
-  const actions: LoopResult['actions'] = [];
+  let tradesThisRun = 0;
 
-  // ---- 1. Manage open positions first -------------------------------------
+  // ---- 1. Manage open positions -------------------------------------------
   const heldTickers = Object.keys(before.ai_fund.positions);
   for (const ticker of heldTickers) {
-    const { quotes } = await getQuotes([ticker]).catch(() => ({ quotes: [] }));
+    const { quotes } = await getQuotes([ticker]).catch(() => ({ quotes: [] as Awaited<ReturnType<typeof getQuotes>>['quotes'] }));
     const q = quotes[0];
-    if (!q) { actions.push({ ticker, action: 'skip', detail: 'no quote available' }); continue; }
-    const pos = before.ai_fund.positions[ticker];
-    const stop = before.ai_fund.stops[ticker];
-    const d = before; // snapshot for age/cooldown checks
+    if (!q) { ctx.addActions([{ ticker, action: 'skip', detail: 'no quote available' }]); continue; }
+    const d = load(); // fresh snapshot per position (marks were just refreshed)
+    const pos = d.ai_fund.positions[ticker];
+    if (!pos) continue;
+    const stop = d.ai_fund.stops[ticker];
 
     // Hard stop: deterministic, no model involved.
     if (typeof stop === 'number' && q.price <= stop) {
-      update((d) => {
+      update((draft) => {
         const plan: PlannedTrade = { ticker, side: 'sell', quantity: pos.quantity, price: q.price, stop_loss: null, rationale: `stop hit at ${q.price} (stop ${stop})`, verdict_id: 'stop-loss' };
-        const t = executeAiTrade(d, plan, q.as_of);
+        const t = executeAiTrade(draft, plan, q.as_of);
+        tradesThisRun += 1;
         return { committed: true, value: t };
       });
-      actions.push({ ticker, action: 'stop-sell', detail: `sold ${pos.quantity} @ ${q.price} (stop ${stop})` });
+      ctx.addActions([{ ticker, action: 'stop-sell', detail: `sold ${pos.quantity} @ ${q.price} (stop ${stop})` }]);
       continue;
     }
 
@@ -69,20 +123,25 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
     // entry. The hard stop above always fires regardless.
     const entryTrade = [...d.ai_fund.trades].reverse().find((t) => t.side === 'buy' && t.ticker === ticker);
     if (entryTrade && daysSince(entryTrade.executed_at) < MIN_HOLD_DAYS) {
-      actions.push({ ticker, action: 'hold', detail: `min-hold (${daysSince(entryTrade.executed_at).toFixed(1)}d old, ${MIN_HOLD_DAYS}d required)` });
+      ctx.addActions([{ ticker, action: 'hold', detail: `min-hold (${daysSince(entryTrade.executed_at).toFixed(1)}d old, ${MIN_HOLD_DAYS}d required)` }]);
       continue;
     }
     const verdictRes = await researchOne(ticker, lessons);
-    if (!verdictRes.ok) { actions.push({ ticker, action: 'skip', detail: verdictRes.error }); continue; }
+    if (!verdictRes.ok) {
+      ctx.addActions([{ ticker, action: 'skip', detail: verdictRes.error }]);
+      ctx.addFailures([{ kind: 'model', note: `research failed for ${ticker}: ${verdictRes.error}` }]);
+      continue;
+    }
     if (verdictRes.outcome.verdict === 'avoid') {
-      update((d) => {
+      update((draft) => {
         const plan: PlannedTrade = { ticker, side: 'sell', quantity: pos.quantity, price: q.price, stop_loss: null, rationale: verdictRes.outcome.summary.slice(0, 300), verdict_id: verdictRes.outcome.id };
-        const t = executeAiTrade(d, plan, q.as_of);
+        const t = executeAiTrade(draft, plan, q.as_of);
+        tradesThisRun += 1;
         return { committed: true, value: t };
       });
-      actions.push({ ticker, action: 'exit-sell', detail: `sold ${pos.quantity} @ ${q.price}: ${verdictRes.outcome.summary.slice(0, 120)}` });
+      ctx.addActions([{ ticker, action: 'exit-sell', detail: `sold ${pos.quantity} @ ${q.price}: ${verdictRes.outcome.summary.slice(0, 120)}` }]);
     } else {
-      actions.push({ ticker, action: 'hold', detail: `${verdictRes.outcome.verdict} (${verdictRes.outcome.confidence})` });
+      ctx.addActions([{ ticker, action: 'hold', detail: `${verdictRes.outcome.verdict} (${verdictRes.outcome.confidence})` }]);
     }
   }
 
@@ -90,26 +149,39 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
   const afterHolds = load();
   const openCount = Object.keys(afterHolds.ai_fund.positions).length;
   const candidate = await pickCandidate(afterHolds, heldTickers);
-  if (!candidate) {
-    actions.push({ ticker: '-', action: 'scan', detail: 'no new candidate worth researching' });
+  if (candidate === null) {
+    // Distinguish "market data unavailable" from "nothing worth researching":
+    // getMoversStrict throws on an unreachable feed, returns [] on an empty
+    // screen — a dead data source becomes a run failure, not a quiet no-op.
+    try {
+      const movers = await getMoversStrict('most_actives', 1);
+      if (movers.length === 0) {
+        ctx.addActions([{ ticker: '-', action: 'scan', detail: 'no new candidate worth researching' }]);
+      }
+    } catch (err) {
+      const note = err instanceof Error ? err.message : String(err);
+      ctx.addActions([{ ticker: '-', action: 'scan', detail: `movers unavailable: ${note.slice(0, 160)} — no candidate scanned` }]);
+      ctx.addFailures([{ kind: 'data', note: `movers unavailable: ${note.slice(0, 300)}` }]);
+    }
   } else if (openCount >= MAX_OPEN_POSITIONS) {
-    actions.push({ ticker: '-', action: 'scan', detail: 'max open positions' });
+    ctx.addActions([{ ticker: '-', action: 'scan', detail: 'max open positions' }]);
   } else {
     const verdictRes = await researchOne(candidate, lessons);
     if (!verdictRes.ok) {
-      actions.push({ ticker: candidate, action: 'skip', detail: verdictRes.error });
+      ctx.addActions([{ ticker: candidate, action: 'skip', detail: verdictRes.error }]);
+      ctx.addFailures([{ kind: 'model', note: `research failed for ${candidate}: ${verdictRes.error}` }]);
     } else {
       const v = verdictRes.outcome;
       // Re-entry cooldown: don't chase back into a name we just sold — the
       // classic whipsaw under frequent runs.
       const lastSell = lastSellOf(afterHolds, candidate);
       if (lastSell && daysSince(lastSell) < REBUY_COOLDOWN_DAYS) {
-        actions.push({ ticker: candidate, action: 'no-trade', detail: `re-entry cooldown (${daysSince(lastSell).toFixed(1)}d since last sell, ${REBUY_COOLDOWN_DAYS}d required)` });
+        ctx.addActions([{ ticker: candidate, action: 'no-trade', detail: `re-entry cooldown (${daysSince(lastSell).toFixed(1)}d since last sell, ${REBUY_COOLDOWN_DAYS}d required)` }]);
       } else {
       const { quotes } = await getQuotes([candidate]);
       const q = quotes[0];
       if (!q) {
-        actions.push({ ticker: candidate, action: 'skip', detail: 'no quote at decision time' });
+        ctx.addActions([{ ticker: candidate, action: 'skip', detail: 'no quote at decision time' }]);
       } else {
         const planned = planTradeFromVerdict(afterHolds, {
           ticker: candidate,
@@ -123,13 +195,14 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
           lessons,
         });
         if (!planned.ok) {
-          actions.push({ ticker: candidate, action: 'no-trade', detail: planned.reason });
+          ctx.addActions([{ ticker: candidate, action: 'no-trade', detail: planned.reason }]);
         } else {
-          update((d) => {
-            const t = executeAiTrade(d, planned.plan, q.as_of);
+          update((draft) => {
+            const t = executeAiTrade(draft, planned.plan, q.as_of);
+            tradesThisRun += 1;
             return { committed: true, value: t };
           });
-          actions.push({ ticker: candidate, action: 'buy', detail: `${planned.plan.quantity} @ ${q.price} (stop ${planned.plan.stop_loss ?? '—'}): ${v.summary.slice(0, 100)}` });
+          ctx.addActions([{ ticker: candidate, action: 'buy', detail: `${planned.plan.quantity} @ ${q.price} (stop ${planned.plan.stop_loss ?? '—'}): ${v.summary.slice(0, 100)}` }]);
         }
       }
       }
@@ -138,16 +211,9 @@ export async function runFundLoop(): Promise<{ ok: true; result: LoopResult } | 
 
   // ---- 3. Reflect on newly closed trades ----------------------------------
   const reflections = await reflectOnClosedTrades();
-  actions.push(...reflections);
+  ctx.addActions(reflections);
 
-  return {
-    ok: true,
-    result: {
-      ran_at: new Date().toISOString(),
-      actions,
-      equity_usd: Number(fundEquity(load()).toFixed(2)),
-    },
-  };
+  ctx.recordTrades(tradesThisRun);
 }
 
 function parseLevel(s: string | null, fallback: number): number | null {
@@ -156,6 +222,14 @@ function parseLevel(s: string | null, fallback: number): number | null {
   if (!m) return null;
   const n = Number(m[1]);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+interface ResearchOutcome {
+  id: string;
+  verdict: string;
+  confidence: string;
+  summary: string;
+  stop_loss: string | null;
 }
 
 /** Research one ticker through the standard agent; logs it like any run. */

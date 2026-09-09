@@ -133,7 +133,11 @@ export const api = {
   verdictLogScored: () =>
     get<{ entries: ScoredVerdict[]; summary: TrackRecordSummary }>('/api/verdict-log'),
   fund: () => get<AiFundView>('/api/fund'),
-  runFund: () => post<{ ran_at: string; actions: { ticker: string; action: string; detail: string }[]; equity_usd: number }>('/api/fund/run', {}),
+  refreshFundMarks: () =>
+    post<{ updated: string[]; failed: { ticker: string; reason: string }[]; fetched_at: string; marks_stale: boolean; equity_usd: number; note: string }>(
+      '/api/fund/marks/refresh', {}),
+  runFund: (requestId?: string) =>
+    post<{ ran_at: string; actions: { ticker: string; action: string; detail: string }[]; equity_usd: number; run_id: string; status: string; reused?: boolean }>('/api/fund/run', requestId ? { request_id: requestId, trigger: 'manual' } : { trigger: 'manual' }),
 };
 
 export const fmtUsd = (n: number): string =>
@@ -213,14 +217,47 @@ export interface TrackRecordSummary {
   disclaimer: string;
 }
 
+export interface AiFundMarkFreshness {
+  price_known: boolean;
+  carrying_at_cost: boolean;
+  stale: boolean;
+  quote_as_of: string | null;
+  fetched_at: string | null;
+  quote_source: string | null;
+}
+
+export interface AiFundRunView {
+  id: string;
+  request_id?: string;
+  trigger: 'scheduled' | 'manual' | 'chat';
+  started_at: string;
+  finished_at: string | null;
+  status: 'running' | 'completed' | 'partial' | 'failed' | 'interrupted';
+  actions: { ticker: string; action: string; detail: string }[];
+  failures: { kind: string; note: string }[];
+  trades_occurred: boolean;
+  equity_usd: number | null;
+  valued_at: string | null;
+  marks_stale: boolean;
+  model_used: string | null;
+  imported?: boolean;
+  note?: string;
+}
+
 export interface AiFundView {
   cash_usd: number;
   equity_usd: number;
   pnl_usd: number;
   realized_pnl_usd: number;
-  positions: { ticker: string; quantity: number; avg_cost: number; mark: number; value_usd: number; pnl_usd: number; stop: number | null }[];
+  unrealized_pnl_usd: number;
+  marks_stale: boolean;
+  positions: { ticker: string; quantity: number; avg_cost: number; mark: number; mark_freshness: AiFundMarkFreshness; value_usd: number; pnl_usd: number; stop: number | null }[];
   trades: { id: string; ticker: string; side: 'buy' | 'sell'; quantity: number; price: number; quote_as_of: string; executed_at: string; rationale: string; realized_pnl_usd?: number; pnl_pct?: number }[];
   lessons: { id: string; ticker: string; lesson: string; closed_at: string }[];
+  runs: AiFundRunView[];
+  last_run: AiFundRunView | null;
+  running_run: { id: string; trigger: string; started_at: string; status: string } | null;
+  next_scheduled_run: { at: string; schedule_times_local: string[]; source: string; note: string } | null;
 }
 
 export interface ScoredVerdict extends VerdictLogEntry {

@@ -119,6 +119,35 @@ export async function getMovers(kind: MoverKind, count = 15): Promise<Mover[]> {
   return quotes.map(toMover).filter((m): m is Mover => m !== null);
 }
 
+function getJsonStrict(url: string): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  return (async () => {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': UA, accept: 'application/json' }, signal: controller.signal });
+      if (!res.ok) throw new Error(`screener returned ${res.status}`);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+}
+
+/**
+ * Movers with an honest failure mode: an UNREACHABLE feed throws ("no data"
+ * is not the same as "no movers"), while a reachable feed with an empty
+ * screen returns []. The fund loop relies on this distinction so a dead data
+ * source is recorded as a run failure instead of a quiet no-op.
+ */
+export async function getMoversStrict(kind: MoverKind, count = 15): Promise<Mover[]> {
+  const n = Math.min(Math.max(1, Math.floor(count)), 50);
+  const body = await getJsonStrict(`${SCREENER}?scrIds=${kind}&count=${n}`);
+  const quotes = (body as { finance?: { result?: { quotes?: Record<string, unknown>[] }[] } })
+    ?.finance?.result?.[0]?.quotes;
+  if (!Array.isArray(quotes)) return [];
+  return quotes.map(toMover).filter((m): m is Mover => m !== null);
+}
+
 export interface PriceHistory {
   ticker: string;
   bars: number;

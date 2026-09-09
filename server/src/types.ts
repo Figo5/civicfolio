@@ -81,6 +81,58 @@ export interface ChatMessage {
   data_sources?: Record<string, DataSourceStatus>;
 }
 
+/** A known price for a held ticker, with the freshness the estimate deserves.
+ *  quote_as_of is the EXCHANGE timestamp of the price; fetched_at is when this
+ *  app recorded it. They are different on purpose — an old quote must never
+ *  be relabelled with the current time. */
+export interface AiFundMark {
+  price: number; // finite, > 0
+  quote_as_of: string | null; // exchange timestamp; null = unknown, never guessed
+  fetched_at: string | null; // when this app recorded the mark
+  source: 'quote' | 'trade' | 'imported';
+  quote_source?: string; // e.g. "yahoo"; only when source === 'quote'
+  stale?: boolean; // a later refresh could not confirm this price
+}
+
+/** One ticker-level decision inside a fund run. Holds and no-trades are
+ *  decisions too — they are recorded, not swallowed. */
+export interface AiFundRunAction {
+  ticker: string;
+  action: string; // buy | sell | stop-sell | exit-sell | hold | no-trade | skip | scan | lesson | reflect-failed | mark-failed
+  detail: string;
+}
+
+/** A data or model failure inside a run. Partial failure stays visible. */
+export interface AiFundRunFailure {
+  kind: 'data' | 'model' | 'other';
+  detail: string;
+}
+
+/** One durable record of a fund loop pass. Paper bookkeeping only. */
+export interface AiFundRun {
+  id: string;
+  request_id?: string; // client idempotency key; a retry returns the same run
+  trigger: 'scheduled' | 'manual' | 'chat';
+  started_at: string;
+  finished_at: string | null;
+  status: 'running' | 'completed' | 'partial' | 'failed' | 'interrupted';
+  actions: AiFundRunAction[];
+  // Data/model failures; empty means every source answered. Never swallowed
+  // into 'completed' — a hold/no-trade run with a dead source is 'partial'.
+  failures: { kind: string; note: string }[];
+  trades_occurred: boolean;
+  equity_usd: number | null;
+  // Valuation snapshot: when the marks were last confirmed, and whether any
+  // mark was stale/unavailable at finalize time.
+  valued_at: string | null;
+  marks_stale: boolean;
+  model_used: string | null; // actual model identifier when known
+  // Historical fund.log summaries are imported, never fabricated: they carry
+  // only what the log line states.
+  imported?: boolean;
+  note?: string;
+}
+
 /** A recommendation as it stood when made, so it can be revisited later. */
 export interface VerdictLogEntry {
   id: string;
@@ -131,12 +183,19 @@ export interface AiFundState {
   cash_usd: number;
   started_at: string;
   positions: Record<string, { quantity: number; avg_cost: number }>;
-  // ticker -> latest known price (from the delayed feed) for marking equity
-  marks: Record<string, number>;
+  // ticker -> latest known price with its own timestamps (from the delayed
+  // feed) for marking equity. A mark without freshness is not a mark.
+  marks: Record<string, AiFundMark>;
   // ticker -> active stop from the trade thesis
   stops: Record<string, number>;
   trades: AiTrade[];
+  // Bounded, versioned history of loop passes (see AiFundRun). Oldest entries
+  // are dropped; the newest MAX_AI_FUND_RUNS are kept.
+  runs?: AiFundRun[];
 }
+
+// Bounded run history: a personal app, not an archive.
+export const MAX_AI_FUND_RUNS = 200;
 
 export interface AiTrade {
   id: string;

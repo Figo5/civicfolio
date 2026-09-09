@@ -11,10 +11,60 @@ import { buildInsights } from './insights.js';
 import { getFundamentals } from './fundamentals.js';
 import { runResearchAgent, getAgentConfig, verifyLevels, webSearch, type AgentSources } from './ollamaAgent.js';
 import { runFundLoop } from './fundLoop.js';
-import { fundEquity } from './aiFund.js';
+import { activeRun, finalizeInterruptedRuns } from './fundRuns.js';
+import { refreshFundMarks, fundEquity, positionView, marksAreStale } from './aiFund.js';
+import { classifyFundIntent, fundStatusAnswer, fundExplainAnswer } from './fundChat.js';
+import { importFundLogOnceIfEmpty } from './fundLogImport.js';
 import { scoreVerdicts, summarizeScored } from './trackRecord.js';
 import { cleanText } from './validate.js';
 import type { AppData, ChatMessage } from './types.js';
+
+// Real launchd schedule for local.civicfolio.fund (clock times, LOCAL time).
+// Read from the plist so the UI's "next run" is derived, not invented. This is
+// a CLOCK-based schedule: it fires on weekends/holidays too — never described
+// as trading-day aware.
+const LAUNCHD_PLIST = typeof process.env.HOME === 'string' && process.env.HOME !== ''
+  ? `${process.env.HOME}/Library/LaunchAgents/local.civicfolio.fund.plist`
+  : '';
+const FALLBACK_FUND_SCHEDULE = [{ hour: 9, minute: 35 }, { hour: 10, minute: 30 }, { hour: 11, minute: 30 }, { hour: 12, minute: 30 }, { hour: 13, minute: 30 }, { hour: 14, minute: 30 }, { hour: 15, minute: 30 }, { hour: 15, minute: 50 }];
+
+function readFundSchedule(): { minutes: { hour: number; minute: number }[]; source: string } {
+  try {
+    if (LAUNCHD_PLIST && fs.existsSync(LAUNCHD_PLIST)) {
+      const xml = fs.readFileSync(LAUNCHD_PLIST, 'utf8');
+      const intervals: { hour: number; minute: number }[] = [];
+      const blockRe = /<dict>\s*<key>Hour<\/key>\s*<integer>(\d+)<\/integer>\s*<key>Minute<\/key>\s*<integer>(\d+)<\/integer>\s*<\/dict>/g;
+      let m: RegExpExecArray | null;
+      while ((m = blockRe.exec(xml)) !== null) {
+        const hour = Number(m[1]), minute = Number(m[2]);
+        if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) intervals.push({ hour, minute });
+      }
+      if (intervals.length > 0) return { minutes: intervals.sort((a, b) => a.hour * 60 + a.minute - (b.hour * 60 + b.minute)), source: 'launchd plist (StartCalendarInterval)' };
+    }
+  } catch { /* fall through to defaults */ }
+  return { minutes: FALLBACK_FUND_SCHEDULE, source: 'bundled defaults (plist unreadable)' };
+}
+
+/** Next occurrence of the clock schedule AFTER now, local time. */
+function nextScheduledRun(now = new Date()): { at: string; schedule_times_local: string[]; source: string } | null {
+  const { minutes, source } = readFundSchedule();
+  if (minutes.length === 0) return null;
+  for (let dayOffset = 0; dayOffset < 2; dayOffset++) {
+    for (const { hour, minute } of minutes) {
+      const t = new Date(now);
+      t.setDate(t.getDate() + dayOffset);
+      t.setHours(hour, minute, 0, 0);
+      if (t.getTime() > now.getTime()) {
+        return {
+          at: t.toISOString(),
+          schedule_times_local: minutes.map((x) => `${String(x.hour).padStart(2, '0')}:${String(x.minute).padStart(2, '0')}`),
+          source,
+        };
+      }
+    }
+  }
+  return null;
+}
 
 const MAX_IMPORT_BYTES = 5 * 1024 * 1024; // 5MB import cap
 
@@ -374,20 +424,67 @@ export function createApp(): express.Express {
       if (!cfg.enabled && !agent.enabled) {
         return fail(res, 400, 'LLM mode not configured on the server (start the Ollama daemon or set OPENAI_API_KEY).');
       }
-      // Fund commands: the user can tell the agent to run its paper fund.
-      if (/\brun (the )?fund\b|make (a |some )?trades?\b|trade (for )?yourself\b|do your (thing|trades)\b/i.test(question)) {
-        const loop = await runFundLoop();
-        if (!loop.ok) return fail(res, 502, loop.error);
-        const lines = loop.result.actions.map((a) => `- **${a.ticker}** ${a.action}: ${a.detail}`);
-        const userMsg: ChatMessage = { role: 'user', content: question, ts: new Date().toISOString() };
+      // FUND INTENT: strict classification. Execution requires an affirmative
+      // imperative ("run the paper fund"); questions and negations ("Did you
+      // run the fund?", "Don't run the fund", "what did the fund do today?")
+      // get a READ-ONLY snapshot and can never start a loop.
+      const intent = classifyFundIntent(question);
+      if (intent === 'run') {
+        const outcome = await runFundLoop({ trigger: 'chat', requestId: typeof body.request_id === 'string' ? cleanText(body.request_id, 100) : undefined });
+        if (outcome.run.status === 'failed') {
+          // Total failure (e.g. no model transport): explicit 502 with the run
+          // record, never a fabricated "run complete" message.
+          return fail(res, 502, `fund run failed: ${outcome.error ?? (outcome.run.failures.map((f) => f.note).join('; ') || 'unknown failure')}`);
+        }
+        const statusWord = outcome.run.status === 'partial' ? 'finished with failures' : 'complete';
+        const runLine = `Run ${outcome.run.id.slice(0, 8)} — status: ${outcome.run.status}${outcome.reused ? ' (a run was already executing; this is that run, not a duplicate)' : ''}${outcome.run.marks_stale ? ' · some marks stale' : ''}.`;
+        const lines = outcome.run.actions.map((a) => `- **${a.ticker}** ${a.action}: ${a.detail}`);
+        const failLines = outcome.run.failures.map((f) => `- ⚠ ${f.kind}: ${f.note}`);
+        const content = `Paper fund run ${statusWord} — equity $${outcome.result.equity_usd.toFixed(2)} (fictional $10k fund, delayed-quote estimates).\n\n${runLine}\n\n${lines.join('\n')}${failLines.length > 0 ? `\n\nFailures during the run:\n${failLines.join('\n')}` : ''}`;
+        const ts = new Date().toISOString();
+        const userMsg: ChatMessage = { role: 'user', content: question, ts, ...(thread ? { ticker: thread } : {}) };
         const msg: ChatMessage = {
           role: 'assistant',
-          content: `Fund run complete — equity $${loop.result.equity_usd.toFixed(2)}.\n\n${lines.join('\n')}`,
-          mode: 'llm', ts: new Date().toISOString(),
+          content,
+          mode: 'llm', ts,
+          ...(thread ? { ticker: thread } : {}),
+          model_used: outcome.run.model_used ?? null,
+          data_sources: { fund_run: { available: true, as_of: outcome.run.finished_at ?? outcome.run.started_at, note: `run ${outcome.run.id.slice(0, 8)} (${outcome.run.trigger})` } },
         };
         update((draft) => { draft.chat.push(userMsg, msg); return { committed: true, value: undefined as void }; });
         return res.json({ message: msg });
       }
+      if (intent === 'status') {
+        // Read-only: no loop, no model call required for the core answer.
+        const dNow = data();
+        // "Why is the fund holding X?" -> explain the recorded rationale.
+        const whyMatch = /\bwhy\b[\s\S]{0,40}\b(holding|hold|bought|buy)\b[\s\S]{0,20}\b([A-Z]{1,10})\b/i.exec(question.toUpperCase());
+        let content: string;
+        let dataSources: Record<string, { available: boolean; as_of: string | null; note: string }> = {
+          fund_store: { available: true, as_of: new Date().toISOString(), note: 'read-only local fund record (marks + runs + trades)' },
+        };
+        if (whyMatch) {
+          const explain = fundExplainAnswer(dNow, whyMatch[2].toUpperCase());
+          content = explain ?? fundStatusAnswer(dNow);
+        } else {
+          // A named ticker inside a fund question must not hijack this into a
+          // quote lookup; also never let "AI" be parsed as a ticker.
+          content = fundStatusAnswer(dNow);
+        }
+        const ts = new Date().toISOString();
+        const userMsg: ChatMessage = { role: 'user', content: question, ts, ...(thread ? { ticker: thread } : {}) };
+        const msg: ChatMessage = {
+          role: 'assistant',
+          content,
+          mode: 'llm', ts,
+          ...(thread ? { ticker: thread } : {}),
+          model_used: null, // deterministic snapshot; no model was consulted
+          data_sources: dataSources,
+        };
+        update((draft) => { draft.chat.push(userMsg, msg); return { committed: true, value: undefined as void }; });
+        return res.json({ message: msg });
+      }
+      // Not a fund intent: fall through to the normal LLM path below.
       // Minimal lower-trust projection: no user content is sent.
       // Full research context — the same pipeline the Research button gets:
       // live quotes, headlines, top movers, SEC fundamentals, plus a real web
@@ -395,7 +492,7 @@ export function createApp(): express.Express {
       // search results ride back on the chat message.
       const questionTickers = [...question.matchAll(/\b[A-Z]{2,5}\b/g)]
         .map((m) => m[0])
-        .filter((t) => !['BUY', 'SELL', 'HOLD', 'ETF', 'A', 'I', 'LLM', 'API', 'US', 'USD', 'IPO', 'CEO', 'FDA'].includes(t))
+        .filter((t) => !['BUY', 'SELL', 'HOLD', 'ETF', 'A', 'I', 'LLM', 'API', 'US', 'USD', 'IPO', 'CEO', 'FDA', 'AI'].includes(t))
         .slice(0, 5);
       // No ticker named? Fall back to today's most active names so general
       // questions ("what should I buy today?") still ground on real prices.
@@ -725,36 +822,86 @@ export function createApp(): express.Express {
   // The agent researches, decides, and trades its own $10k fund. The model
   // never types an execution price and never sizes positions — the code does
   // all arithmetic. No broker exists in this app; nothing here touches real money.
+  //
+  // On route creation: abandoned 'running' records from a previous process are
+  // finalized as 'interrupted' (never replayed), and the historical fund.log
+  // summaries are imported once (labeled, idempotent, skipped if real history
+  // already exists). Production reads ~/.civicfolio/fund.log; tests set
+  // CIVICFOLIO_FUND_LOG to a fixture file.
+  finalizeInterruptedRuns();
+  importFundLogOnceIfEmpty();
+
+  // Read-only snapshot with mark freshness + run history. Viewing the fund
+  // NEVER executes trades — every field here is derived from the stored record.
   app.get('/api/fund', (_req, res) => {
     const d = data();
-    const positions = Object.entries(d.ai_fund.positions).map(([ticker, p]) => {
-      const mark = d.ai_fund.marks[ticker] ?? p.avg_cost;
-      const mv = mark * p.quantity;
-      return {
-        ticker, quantity: p.quantity, avg_cost: p.avg_cost, mark,
-        value_usd: Number(mv.toFixed(2)),
-        pnl_usd: Number((mv - p.avg_cost * p.quantity).toFixed(2)),
-        stop: d.ai_fund.stops[ticker] ?? null,
-      };
-    });
+    const positions = Object.keys(d.ai_fund.positions).map((ticker) => positionView(d, ticker));
     const equity = fundEquity(d);
     const realized = d.ai_fund.trades.filter((t) => typeof t.realized_pnl_usd === 'number')
       .reduce((s, t) => s + (t.realized_pnl_usd ?? 0), 0);
+    const runs = [...(d.ai_fund.runs ?? [])].reverse(); // newest first
+    const lastRun = runs.find((r) => r.status !== 'running') ?? null;
+    const running = activeRun() ?? runs.find((r) => r.status === 'running') ?? null;
+    const next = nextScheduledRun();
     res.json({
+      // Paper estimates at delayed quotes — never real execution returns.
       cash_usd: Number(d.ai_fund.cash_usd.toFixed(2)),
       equity_usd: Number(equity.toFixed(2)),
       pnl_usd: Number((equity - 10000).toFixed(2)),
       realized_pnl_usd: Number(realized.toFixed(2)),
+      unrealized_pnl_usd: Number((equity - 10000 - realized).toFixed(2)),
+      marks_stale: marksAreStale(d),
       positions,
       trades: d.ai_fund.trades.slice(0, 50),
       lessons: d.ai_lessons.slice(0, 20),
+      runs: runs.slice(0, 20),
+      last_run: lastRun,
+      running_run: running ? { id: running.id, trigger: running.trigger, started_at: running.started_at, status: running.status } : null,
+      next_scheduled_run: next ? {
+        at: next.at,
+        schedule_times_local: next.schedule_times_local,
+        source: next.source,
+        note: 'Clock-based launchd schedule (local time). It fires on weekends and market holidays too — it is NOT trading-day aware.',
+      } : null,
     });
   });
 
-  app.post('/api/fund/run', async (_req, res) => {
-    const result = await runFundLoop();
-    if (!result.ok) return fail(res, 502, result.error);
-    res.json(result.result);
+  // Valuation-only refresh: marks to market for held positions. NEVER trades —
+  // separate from the run loop by design (B).
+  app.post('/api/fund/marks/refresh', async (_req, res) => {
+    const result = await refreshFundMarks();
+    const d = data();
+    res.json({
+      updated: result.updated,
+      failed: result.failed,
+      fetched_at: result.fetched_at,
+      marks_stale: marksAreStale(d),
+      equity_usd: Number(fundEquity(d).toFixed(2)),
+      note: 'Delayed-quote paper estimates only. Refreshing marks never places orders and never runs the trading loop.',
+    });
+  });
+
+  // Run history (bounded, newest first). Read-only.
+  app.get('/api/fund/runs', (_req, res) => {
+    const runs = [...(data().ai_fund.runs ?? [])].reverse();
+    res.json({ runs: runs.slice(0, 50), total: runs.length });
+  });
+
+  // The guarded coordinator: scheduled runner, Run-the-fund button, and chat
+  // all come through here. Concurrent requests share one execution (the
+  // response carries run id/status either way); a retried request_id returns
+  // the same run instead of rerunning.
+  app.post('/api/fund/run', async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const requestId = typeof body.request_id === 'string' ? cleanText(body.request_id, 100) : undefined;
+    const trigger = typeof body.trigger === 'string' && ['scheduled', 'manual', 'chat'].includes(body.trigger)
+      ? (body.trigger as 'scheduled' | 'manual' | 'chat')
+      : 'manual';
+    const outcome = await runFundLoop({ trigger, requestId });
+    if (outcome.error && outcome.run.status === 'failed') {
+      return res.status(502).json({ error: outcome.error, run: outcome.run });
+    }
+    res.json({ ...outcome.result, run_id: outcome.run.id, status: outcome.run.status, reused: outcome.reused });
   });
 
   // ---- settings (no secrets) ----

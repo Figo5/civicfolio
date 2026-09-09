@@ -1,4 +1,5 @@
-import type { AppData, WatchlistItem, TrackedIdea, PaperTrade, PortfolioState, ChatMessage, AiTrade } from './types.js';
+import type { AppData, WatchlistItem, TrackedIdea, PaperTrade, PortfolioState, ChatMessage, AiTrade, AiFundMark, AiFundRun } from './types.js';
+import { MAX_AI_FUND_RUNS } from './types.js';
 import { isFiniteNumber } from './validate.js';
 
 import fs from 'node:fs';
@@ -34,7 +35,7 @@ export function emptyData(): AppData {
     chat: [],
     ai_fund: emptyAiFund(),
     ai_lessons: [],
-    meta: { schema_version: 2 },
+    meta: { schema_version: 3 },
   };
 }
 
@@ -80,11 +81,83 @@ function sanitizePortfolio(p: unknown): PortfolioState {
 }
 
 export function emptyAiFund(): AppData['ai_fund'] {
-  return { cash_usd: 10000, started_at: new Date().toISOString(), positions: {}, marks: {}, stops: {}, trades: [] };
+  return { cash_usd: 10000, started_at: new Date().toISOString(), positions: {}, marks: {}, stops: {}, trades: [], runs: [] };
+}
+
+// Schema-2 marks were bare numbers (ticker -> price) with no freshness. On
+// load they migrate to mark objects carried at their recorded value with
+// unknown timestamps — never relabelled with the current time.
+function sanitizeMark(v: unknown): AiFundMark | null {
+  if (typeof v === 'number') {
+    // Legacy bare-number mark: keep the price, mark the timestamps unknown.
+    return isFiniteNumber(v) && v > 0
+      ? { price: v, quote_as_of: null, fetched_at: null, source: 'trade' as const }
+      : null;
+  }
+  if (!v || typeof v !== 'object') return null;
+  const m = v as Record<string, unknown>;
+  if (!isFiniteNumber(m.price) || (m.price as number) <= 0) return null;
+  const src = m.source === 'quote' || m.source === 'trade' || m.source === 'imported' ? m.source as AiFundMark['source'] : 'trade' as const;
+  const mark: AiFundMark = {
+    price: m.price as number,
+    quote_as_of: typeof m.quote_as_of === 'string' ? m.quote_as_of : null,
+    fetched_at: typeof m.fetched_at === 'string' ? m.fetched_at : null,
+    source: src,
+    ...(typeof m.quote_source === 'string' ? { quote_source: m.quote_source } : {}),
+    ...(m.stale === true ? { stale: true } : {}),
+  };
+  return mark;
+}
+
+function sanitizeRuns(v: unknown): AiFundRun[] {
+  if (!Array.isArray(v)) return [];
+  const runs: AiFundRun[] = [];
+  for (const r of v) {
+    if (!r || typeof r !== 'object') continue;
+    const o = r as Record<string, unknown>;
+    const status = ['running', 'completed', 'partial', 'failed', 'interrupted'].includes(String(o.status))
+      ? (o.status as AiFundRun['status'])
+      : 'failed';
+    const trigger = ['scheduled', 'manual', 'chat'].includes(String(o.trigger))
+      ? (o.trigger as AiFundRun['trigger'])
+      : null;
+    if (!trigger) continue;
+    const actions = Array.isArray(o.actions)
+      ? (o.actions as unknown[]).filter((a): a is AiFundRun['actions'][number] => {
+          if (!a || typeof a !== 'object') return false;
+          const av = a as Record<string, unknown>;
+          return typeof av.ticker === 'string' && typeof av.action === 'string' && typeof av.detail === 'string';
+        }).map((a) => ({ ticker: a.ticker.slice(0, 12).toUpperCase(), action: a.action.slice(0, 40), detail: String(a.detail).slice(0, 500) }))
+      : [];
+    const failures = Array.isArray(o.failures)
+      ? (o.failures as unknown[]).filter((f) => f && typeof f === 'object' && typeof (f as Record<string, unknown>).note === 'string')
+        .map((f) => ({ kind: String((f as Record<string, unknown>).kind).slice(0, 20), note: String((f as Record<string, unknown>).note).slice(0, 500) }))
+      : [];
+    runs.push({
+      id: typeof o.id === 'string' ? o.id.slice(0, 64) : '',
+      ...(typeof o.request_id === 'string' ? { request_id: o.request_id.slice(0, 100) } : {}),
+      trigger,
+      started_at: typeof o.started_at === 'string' ? o.started_at : '',
+      finished_at: typeof o.finished_at === 'string' ? o.finished_at : null,
+      status,
+      actions,
+      failures,
+      trades_occurred: o.trades_occurred === true,
+      equity_usd: isFiniteNumber(o.equity_usd) ? (o.equity_usd as number) : null,
+      valued_at: typeof o.valued_at === 'string' ? o.valued_at : null,
+      marks_stale: o.marks_stale === true,
+      model_used: typeof o.model_used === 'string' ? o.model_used.slice(0, 120) : null,
+      ...(o.imported === true ? { imported: true } : {}),
+      ...(typeof o.note === 'string' ? { note: o.note.slice(0, 500) } : {}),
+    });
+  }
+  return runs.filter((r) => r.id).slice(-MAX_AI_FUND_RUNS);
 }
 
 // Sanitize a persisted AI fund: finite numbers only, bounded trades. Corrupt
-// entries are dropped, never guessed.
+// entries are dropped, never guessed. MIGRATION (schema 2 -> 3): bare-number
+// marks become freshness-carrying mark objects and `runs` gains run history —
+// positions, trades, cash, stops, and lessons are never dropped.
 function sanitizeAiFund(v: unknown): AppData['ai_fund'] {
   const base = emptyAiFund();
   if (!v || typeof v !== 'object') return base;
@@ -106,7 +179,14 @@ function sanitizeAiFund(v: unknown): AppData['ai_fund'] {
       }
     }
   }
-  for (const key of ['marks', 'stops'] as const) {
+  const marks = obj.marks;
+  if (marks && typeof marks === 'object') {
+    for (const [ticker, n] of Object.entries(marks as Record<string, unknown>)) {
+      const mark = sanitizeMark(n);
+      if (mark) fund.marks[String(ticker).toUpperCase().slice(0, 12)] = mark;
+    }
+  }
+  for (const key of ['stops'] as const) {
     const src = obj[key];
     if (src && typeof src === 'object') {
       for (const [ticker, n] of Object.entries(src as Record<string, unknown>)) {
@@ -114,6 +194,11 @@ function sanitizeAiFund(v: unknown): AppData['ai_fund'] {
       }
     }
   }
+  fund.trades = fund.trades.slice(0, 500);
+  // Run history: migrated/persisted as-is (sanitized, bounded). Abandoned
+  // 'running' records are NOT replayed here — the coordinator finalizes them
+  // to 'interrupted' at route level (a pure sanitize must not invent times).
+  fund.runs = sanitizeRuns(obj.runs);
   return fund;
 }
 
@@ -148,6 +233,17 @@ export function load(): AppData {
         meta: parsed.meta && typeof parsed.meta === 'object' ? { ...base.meta, ...parsed.meta } : base.meta,
       };
       cache = data;
+      // Migration: v2 stores predate marks-with-freshness and run history.
+      // Bump and persist ONCE so the schema change is durable; existing
+      // positions/trades/cash/lessons/marks are untouched (only reshaped).
+      if ((data.meta?.schema_version ?? 0) < 3) {
+        data.meta = { ...data.meta, schema_version: 3 };
+        try {
+          persistData(data);
+        } catch (err) {
+          console.error('[civicfolio] schema migration write failed (continuing with migrated memory):', err);
+        }
+      }
       return data;
     }
   } catch (err) {
