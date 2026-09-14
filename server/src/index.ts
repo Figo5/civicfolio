@@ -22,5 +22,7 @@ const app = createApp();
 app.listen(PORT, HOST, () => {
   console.log(`[civicfolio] API server listening on http://${HOST}:${PORT}`);
   console.log(`[civicfolio] data dir: ${process.env.CIVICFOLIO_DATA_DIR || '~/.civicfolio'}`);
-  if (process.env.OLLAMA_API_KEY) console.log('[civicfolio] research agent: enabled');
+  console.log(process.env.OPENAI_API_KEY?.trim()
+    ? '[civicfolio] AI: enabled (OpenAI, server-side key)'
+    : '[civicfolio] AI: disabled — set OPENAI_API_KEY in .env or ~/.civicfolio/env to enable research and LLM chat');
 });

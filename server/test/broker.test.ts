@@ -1,6 +1,6 @@
 // Unit tests with zero real network or model calls: every fetch-observable
-// surface runs behind mockFetch, and the Ollama daemon is pointed at a host
-// that cannot exist. Isolated temp data dir per suite.
+// surface runs behind mockFetch, AI paths are unconfigured so no model is
+// consulted at all. Isolated temp data dir per suite.
 
 import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,10 +10,14 @@ import path from 'node:path';
 
 const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'civicfolio-isolated-'));
 process.env['CIVICFOLIO_DATA_DIR'] = testDir;
-process.env['OLLAMA_AGENT_HOST'] = 'http://127.0.0.1:9'; // unreachable on purpose
+// AI paths are off in tests: a developer's real key must never turn this
+// suite into paid OpenAI calls. Nothing here injects a provider, so every
+// model call fails closed before the network.
+delete process.env['OPENAI_API_KEY'];
 
 const { createApp } = await import('../src/app.js');
 const { clearQuoteCacheForTests } = await import('../src/quotes.js');
+const { setProviderForTests } = await import('../src/provider.js');
 const { clearMarketCacheForTests } = await import('../src/market.js');
 const { scoreVerdicts, summarizeScored } = await import('../src/trackRecord.js');
 import request from 'supertest';
@@ -115,13 +119,23 @@ describe('disabled brokerage endpoints', () => {
 describe('data availability honesty', () => {
   test('all sources failing -> 503, model never invoked, no fabricated answer', async () => {
     installMock(() => 'refuse'); // every upstream fails
-    const res = await postJson('/api/chat', { question: 'is NVDA a good buy?', mode: 'llm', ticker: 'NVDA' });
-    assert.equal(res.status, 503);
-    assert.match(res.body.error, /All data sources failed/);
-    assert.match(res.body.error, /Nothing was sent to the model/);
-    // No model call was made: the only requests attempted were data fetches
-    // (and each failed inside the mock).
-    assert.ok(calls.every((c) => !c.url.includes('/api/chat')), 'no LLM transport call');
+    // AI is configured (so the route is not short-circuited by the key gate),
+    // and the provider records whether it was ever consulted.
+    let modelCalls = 0;
+    setProviderForTests({
+      model: 'stub-model',
+      generateText: async () => { modelCalls += 1; return { ok: true, content: 'fabricated', model: 'stub-model' }; },
+      generateStructured: async () => { modelCalls += 1; return { ok: false, error: 'unused' }; },
+    });
+    try {
+      const res = await postJson('/api/chat', { question: 'is NVDA a good buy?', mode: 'llm', ticker: 'NVDA' });
+      assert.equal(res.status, 503);
+      assert.match(res.body.error, /All data sources failed/);
+      assert.match(res.body.error, /Nothing was sent to the model/);
+      assert.equal(modelCalls, 0, 'the model is never invoked over an empty page');
+    } finally {
+      setProviderForTests(null);
+    }
   });
 
   test('quote failing but search answering -> chat still works, availability marks the quote failed', async () => {
@@ -133,17 +147,21 @@ describe('data availability honesty', () => {
       }
       return { status: 200, body: {} };
     });
-    const res = await postJson('/api/chat', { question: 'any news on TSLA?', mode: 'llm', ticker: 'TSLA' });
-    if (res.status === 502) {
-      // Model daemon unreachable in the test env — that path is covered elsewhere.
-      assert.match(res.body.error, /LLM/);
-    } else {
+    setProviderForTests({
+      model: 'stub-model',
+      generateText: async () => ({ ok: true, content: 'Nothing dramatic in the TSLA headlines.', model: 'stub-model' }),
+      generateStructured: async () => ({ ok: false, error: 'unused' }),
+    });
+    try {
+      const res = await postJson('/api/chat', { question: 'any news on TSLA?', mode: 'llm', ticker: 'TSLA' });
       assert.equal(res.status, 200);
       assert.equal(res.body.message.ticker, 'TSLA', 'assistant message persists into the ticker thread');
-      assert.ok(res.body.message.model_used, 'model provenance recorded');
+      assert.equal(res.body.message.model_used, 'stub-model', 'model provenance recorded');
       assert.equal(res.body.message.data_sources.quote.available, false, 'failed quote is honestly reported');
       assert.equal(res.body.message.data_sources.quote.as_of, null, 'no fake timestamp for a failed quote');
-      assert.equal(res.body.message.data_sources.web_search.available, true, 'working search is reported');
+      assert.equal(res.body.message.data_sources.web_search.available, true, 'keyless DuckDuckGo search still works');
+    } finally {
+      setProviderForTests(null);
     }
   });
 
@@ -213,13 +231,22 @@ describe('citation validation', () => {
 describe('research endpoint guards', () => {
   test('invalid ticker 400; hostile input never forwarded to a broker', async () => {
     installMock(() => 'refuse');
-    const bad = await postJson('/api/research/!!!');
-    assert.equal(bad.status, 400);
-    const unknown = await postJson('/api/research/ZZZZZ');
-    assert.ok([404, 502].includes(unknown.status), `got ${unknown.status}`);
-    const bodyText = JSON.stringify(unknown.body);
-    assert.doesNotMatch(bodyText, /sk-|Bearer /i, 'no key material in error output');
-    assertNoBrokerCalls();
+    setProviderForTests({
+      model: 'stub-model',
+      generateText: async () => ({ ok: false, error: 'unused' }),
+      generateStructured: async () => ({ ok: false, error: 'unused' }),
+    });
+    try {
+      const bad = await postJson('/api/research/!!!');
+      assert.equal(bad.status, 400);
+      const unknown = await postJson('/api/research/ZZZZZ');
+      assert.ok([404, 502].includes(unknown.status), `got ${unknown.status}`);
+      const bodyText = JSON.stringify(unknown.body);
+      assert.doesNotMatch(bodyText, /sk-|Bearer /i, 'no key material in error output');
+      assertNoBrokerCalls();
+    } finally {
+      setProviderForTests(null);
+    }
   });
 });
 

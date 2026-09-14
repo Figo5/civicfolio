@@ -1,8 +1,7 @@
-// Optional LLM mode. Activated ONLY when server-side env vars are set.
-// The browser can never configure or observe this endpoint.
+// LLM chat mode. Activated ONLY when OPENAI_API_KEY is set server-side.
+// The browser can never configure or observe the provider.
 
-import { randomUUID } from 'node:crypto';
-import { getAgentConfig } from './ollamaAgent.js';
+import { getProvider, getProviderConfig } from './provider.js';
 import type { ChatMessage, DataSourceStatus } from './types.js';
 
 // How direct the assistant is allowed to be. The owner's call, set in server
@@ -13,12 +12,10 @@ export type AdvisorMode = 'analyst' | 'advisor';
 
 export interface LlmConfig {
   enabled: boolean;
-  baseUrl: string;
   model: string;
   advisorMode: AdvisorMode;
   // key never leaves the server; not even its value is echoed, only presence
   hasKey: boolean;
-  transportError?: string; // set when the configured endpoint violates transport rules
 }
 
 export interface LlmResult {
@@ -31,42 +28,13 @@ export interface LlmResult {
   citations?: { record_id: string; source_url: string | null; source_name: string }[];
 }
 
-const DEFAULT_TIMEOUT_MS = 180000; // research answers routinely take 60-120s; 60s aborted mid-answer
-
-// Transport policy: HTTPS by default; plain HTTP only for explicit loopback
-// hosts (local LLM servers like Ollama on 127.0.0.1 / localhost / ::1).
-export function validateEndpointTransport(baseUrl: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    return `OPENAI_BASE_URL is not a valid URL: ${baseUrl}`;
-  }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    return `OPENAI_BASE_URL must be http(s) (got ${url.protocol})`;
-  }
-  if (url.protocol === 'http:') {
-    const host = url.hostname.toLowerCase();
-    const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
-    if (!loopback) {
-      return `OPENAI_BASE_URL uses plain http for a non-loopback host (${host}) — set an https endpoint`;
-    }
-  }
-  return null;
-}
-
 export function getLlmConfig(): LlmConfig {
-  const key = process.env.OPENAI_API_KEY;
-  const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-  const transportError = validateEndpointTransport(baseUrl.replace(/\/+$/, ''));
+  const cfg = getProviderConfig();
   return {
-    enabled: Boolean(key && key.trim() !== '') && transportError === null,
-    baseUrl: baseUrl.replace(/\/+$/, ''),
-    model,
+    enabled: cfg.enabled,
+    model: cfg.model,
     advisorMode: process.env.CIVICFOLIO_ADVISOR_MODE === 'analyst' ? 'analyst' : 'advisor',
-    hasKey: Boolean(key && key.trim() !== ''),
-    ...(transportError ? { transportError } : {}),
+    hasKey: cfg.hasKey,
   };
 }
 
@@ -205,91 +173,22 @@ export function retainSupportedCitations(content: string, supportedRecordIds: st
   return citations;
 }
 
-// Chat LLM calls run through the LOCAL Ollama daemon (signed into Ollama
-// Cloud, no key management), same transport the research agent uses. The
-// OpenAI-compatible remote path remains for anyone who sets OPENAI_API_KEY.
+// Chat generation. All transport, retries, timeouts, and error wording live
+// behind the provider — this function only shapes the prompt and the result.
 export async function callLlm(config: LlmConfig, userQuestion: string, ctx: LlmStoreContext): Promise<LlmResult> {
-  const local = getAgentConfig();
-  if (local.enabled) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-    try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      const apiKey = process.env.OLLAMA_API_KEY?.trim();
-      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-      const res = await fetch(`${local.chatHost}/api/chat`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: local.model,
-          messages: [
-            { role: 'system', content: buildSystemPrompt(config.advisorMode) },
-            { role: 'user', content: wrapUntrustedData(truncateStoreSummary(ctx.dataBlock)) + '\n\nQuestion: ' + userQuestion },
-          ],
-          stream: false,
-          options: { temperature: 0.2 },
-        }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        return { ok: false, error: `LLM endpoint returned ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}` };
-      }
-      const json = await res.json() as { message?: { content?: string } };
-      const content = json?.message?.content;
-      if (typeof content !== 'string' || content.trim() === '') return { ok: false, error: 'LLM endpoint returned no content' };
-      return { ok: true, content: content.trim(), model: local.model, citations: retainSupportedCitations(content, ctx.supportedRecordIds) };
-    } catch (err) {
-      const msg = err instanceof Error && err.name === 'AbortError' ? 'LLM request timed out' : `LLM request failed: ${(err as Error).message}`;
-      return { ok: false, error: msg };
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  if (!config.enabled) return { ok: false, error: 'LLM mode is not configured on the server (set OPENAI_API_KEY in server env).' };
-  const transportError = validateEndpointTransport(config.baseUrl);
-  if (transportError) return { ok: false, error: transportError };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
-  try {
-    const res = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY ?? ''}`,
-        'X-Request-ID': randomUUID(),
-      },
-      body: JSON.stringify({
-        model: config.model,
-        messages: [
-          { role: 'system', content: buildSystemPrompt(config.advisorMode) },
-          {
-            role: 'user',
-            content:
-              wrapUntrustedData(truncateStoreSummary(ctx.dataBlock)) +
-              '\n\nQuestion: ' + userQuestion,
-          },
-        ],
-        temperature: 0.2,
-        max_tokens: 900,
-      }),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      return { ok: false, error: `LLM endpoint returned ${res.status}${text ? `: ${text.slice(0, 200)}` : ''}` };
-    }
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[]; model?: string };
-    const content = json?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string' || content.trim() === '') return { ok: false, error: 'LLM endpoint returned no content' };
-    return { ok: true, content: content.trim(), model: json.model ?? config.model, citations: retainSupportedCitations(content, ctx.supportedRecordIds) };
-  } catch (err) {
-    const msg = err instanceof Error && err.name === 'AbortError' ? 'LLM request timed out' : `LLM request failed: ${(err as Error).message}`;
-    return { ok: false, error: msg };
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await getProvider().generateText({
+    system: buildSystemPrompt(config.advisorMode),
+    user: wrapUntrustedData(truncateStoreSummary(ctx.dataBlock)) + '\n\nQuestion: ' + userQuestion,
+    temperature: 0.2,
+    maxOutputTokens: 900,
+  });
+  if (!res.ok) return { ok: false, error: res.error };
+  return {
+    ok: true,
+    content: res.content,
+    model: res.model,
+    citations: retainSupportedCitations(res.content, ctx.supportedRecordIds),
+  };
 }
 
 // Build an assistant chat message from a successful LLM answer. Shared helper

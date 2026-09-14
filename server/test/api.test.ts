@@ -7,10 +7,15 @@ import path from 'node:path';
 // Isolated data dir for tests — must be set before importing store.js.
 const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'civicfolio-test-'));
 process.env['CIVICFOLIO_DATA_DIR'] = testDir;
+// Hermetic by construction: a developer's real OPENAI_API_KEY must never turn
+// these tests into paid API calls. AI paths are off unless a test explicitly
+// injects a provider through setProviderForTests.
+delete process.env['OPENAI_API_KEY'];
 
 const { createApp } = await import('../src/app.js');
 const { load, dataDir, update, resetCacheForTests } = await import('../src/store.js');
 const { submitTrade } = await import('../src/portfolio.js');
+const { setProviderForTests } = await import('../src/provider.js');
 
 import request from 'supertest';
 
@@ -54,21 +59,48 @@ test('chat abstains on price questions (no fabricated prices)', async () => {
 
 
 
-test('chat LLM mode: model-unavailable path returns 502, never silent fallback', async () => {
-  // No real model/network in unit tests: this machine's test run has no
-  // guarantee the daemon is up, and a live call would be a network test.
-  // What the route must guarantee: when the transport fails, the client sees
-  // an explicit 502 error — the old failure mode (silently answering with the
-  // deterministic engine) is what this pins down.
+test('chat LLM mode without a key: explicit 400, never a silent deterministic answer', async () => {
+  // No OPENAI_API_KEY in this process (cleared above). The old failure mode —
+  // quietly answering with the deterministic engine while claiming LLM mode —
+  // is what this pins down.
   const res = await postJson('/api/chat', { question: 'is BIDU a good buy right now?', mode: 'llm' });
-  assert.ok([200, 502].includes(res.status), `got ${res.status}: ${JSON.stringify(res.body).slice(0, 150)}`);
-  if (res.status === 200) {
-    // If a daemon genuinely answered, the reply is an LLM-mode message with
-    // provenance (model_used set), never an unlabeled answer.
-    assert.equal(res.body.message.mode, 'llm');
-    assert.ok(res.body.message.model_used, 'LLM answers carry the model that produced them');
-  } else {
-    assert.match(res.body.error, /LLM|Ollama|daemon|timed out|failed/i);
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /OPENAI_API_KEY/);
+  assert.doesNotMatch(JSON.stringify(res.body), /sk-|Bearer /i, 'no key material in the error');
+});
+
+test('chat LLM mode with an injected provider: labelled answer with provenance', async () => {
+  setProviderForTests({
+    model: 'gpt-4o-mini',
+    generateText: async () => ({ ok: true, content: 'BIDU is cheap for reasons.', model: 'gpt-4o-mini-2024-07-18' }),
+    generateStructured: async () => ({ ok: false, error: 'not used' }),
+  });
+  try {
+    const res = await postJson('/api/chat', { question: 'is BIDU a good buy right now?', mode: 'llm' });
+    // Data sources are live fetches; if every one fails the route honestly 503s
+    // rather than sending the model at an empty page.
+    assert.ok([200, 503].includes(res.status), `got ${res.status}: ${JSON.stringify(res.body).slice(0, 150)}`);
+    if (res.status === 200) {
+      assert.equal(res.body.message.mode, 'llm');
+      assert.equal(res.body.message.model_used, 'gpt-4o-mini-2024-07-18', 'answers carry the model that produced them');
+    }
+  } finally {
+    setProviderForTests(null);
+  }
+});
+
+test('chat LLM mode surfaces provider failures as 502, never as a fabricated answer', async () => {
+  setProviderForTests({
+    model: 'gpt-4o-mini',
+    generateText: async () => ({ ok: false, error: 'OpenAI rate limit or quota reached. Wait a moment and retry.' }),
+    generateStructured: async () => ({ ok: false, error: 'unused' }),
+  });
+  try {
+    const res = await postJson('/api/chat', { question: 'is BIDU a good buy right now?', mode: 'llm' });
+    assert.ok([502, 503].includes(res.status), `got ${res.status}`);
+    if (res.status === 502) assert.match(res.body.error, /rate limit/i);
+  } finally {
+    setProviderForTests(null);
   }
 });
 
@@ -78,8 +110,20 @@ test('research endpoint: invalid ticker 400, unknown ticker 404, config not leak
   const bad = await postJson('/api/research/!!!');
   assert.equal(bad.status, 400);
 
-  const unknown = await postJson('/api/research/ZZZZZ');
-  assert.ok([404, 502].includes(unknown.status), `unknown ticker → 404 or transport error (got ${unknown.status})`);
+  // Past the key gate (injected provider), the remaining guards are about the
+  // ticker and the market data behind it.
+  setProviderForTests({
+    model: 'stub-model',
+    generateText: async () => ({ ok: false, error: 'unused' }),
+    generateStructured: async () => ({ ok: false, error: 'unused' }),
+  });
+  let unknown;
+  try {
+    unknown = await postJson('/api/research/ZZZZZ');
+  } finally {
+    setProviderForTests(null);
+  }
+  assert.ok([404, 502].includes(unknown.status), `unknown ticker → 404 or provider error (got ${unknown.status})`);
   if (unknown.status === 404) {
     // Research is no longer gated on the local filing store — any listed
     // ticker is researchable, so the 404 is now about market data.
@@ -91,26 +135,42 @@ test('research endpoint: invalid ticker 400, unknown ticker 404, config not leak
   assert.doesNotMatch(bodyText, /sk-|Bearer /i, 'no key material in error output');
 });
 
-test('agent config prefers local daemon by default and reports search availability', async () => {
-  const { getAgentConfig } = await import('../src/ollamaAgent.js');
-  const saved = { key: process.env.OLLAMA_API_KEY, model: process.env.OLLAMA_AGENT_MODEL, host: process.env.OLLAMA_AGENT_HOST };
+test('research endpoint without a key: 400 before any network work', async () => {
+  // The key gate must fire before the agent spends a web search on a run that
+  // cannot produce a verdict.
+  const realFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = (async (...args: any[]) => { fetchCalls += 1; return (realFetch as any)(...args); }) as typeof fetch;
   try {
-    delete process.env.OLLAMA_API_KEY;
-    delete process.env.OLLAMA_AGENT_MODEL;
-    delete process.env.OLLAMA_AGENT_HOST;
-    const cfg = getAgentConfig();
-    assert.equal(cfg.chatHost, 'http://127.0.0.1:11434', 'defaults to local daemon');
-    assert.equal(cfg.searchEnabled, false, 'no key → no web search');
-    assert.equal(cfg.model, 'deepseek-v4-flash:0731-cloud');
-
-    process.env.OLLAMA_API_KEY = 'test-key';
-    const cfg2 = getAgentConfig();
-    assert.equal(cfg2.chatHost, 'http://127.0.0.1:11434', 'chat stays on local daemon (key is only for web search)');
-    assert.equal(cfg2.searchEnabled, true);
+    const res = await postJson('/api/research/AMD');
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /OPENAI_API_KEY/);
+    assert.equal(fetchCalls, 0, 'nothing is fetched when AI is unconfigured');
   } finally {
-    if (saved.key) process.env.OLLAMA_API_KEY = saved.key; else delete process.env.OLLAMA_API_KEY;
-    if (saved.model) process.env.OLLAMA_AGENT_MODEL = saved.model; else delete process.env.OLLAMA_AGENT_MODEL;
-    if (saved.host) process.env.OLLAMA_AGENT_HOST = saved.host; else delete process.env.OLLAMA_AGENT_HOST;
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('meta and settings report provider presence only, never key or endpoint', async () => {
+  const meta = await agent().get('/api/meta');
+  assert.equal(meta.body.agent.provider, 'openai');
+  assert.equal(meta.body.agent.enabled, false, 'no key in this process');
+  assert.doesNotMatch(JSON.stringify(meta.body), /sk-|Bearer |api\.openai\.com/i);
+
+  const s = await agent().get('/api/settings');
+  assert.equal(s.body.providers.research_agent.status, 'not_configured');
+  assert.doesNotMatch(JSON.stringify(s.body), /sk-|Bearer /i);
+
+  process.env.OPENAI_API_KEY = 'test-key-not-secret';
+  process.env.OPENAI_BASE_URL = 'https://alternate-provider.example/account-path';
+  try {
+    const configured = await agent().get('/api/settings');
+    assert.equal(configured.body.providers.llm_endpoint.status, 'configured');
+    assert.doesNotMatch(JSON.stringify(configured.body), /alternate-provider|account-path|base_url_when_configured/i,
+      'unsupported endpoint overrides are neither used nor exposed');
+  } finally {
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_BASE_URL;
   }
 });
 
@@ -364,6 +424,8 @@ test('settings endpoint exposes no secrets and marks robinhood removed', async (
   assert.equal(res.body.robinhood.status, 'removed');
   assert.equal(res.body.robinhood.execution_enabled, false);
   assert.equal(res.body.providers.llm_endpoint.status, 'not_configured');
+  assert.equal(typeof res.body.providers.research_agent.model, 'string', 'frontend provider badge keeps its model field');
+  assert.equal(typeof res.body.providers.research_agent.web_search, 'boolean', 'frontend provider badge keeps a boolean search flag');
   const body = JSON.stringify(res.body);
   assert.ok(!body.toLowerCase().includes('openai_api_key='), 'no key material');
   assert.ok(res.body.data.dir.startsWith(os.tmpdir()));
@@ -526,6 +588,9 @@ test('advisor mode is server-controlled and shapes the prompt', async () => {
   assert.equal(getLlmConfig().advisorMode, 'analyst');
   const analyst = buildSystemPrompt('analyst');
   assert.match(analyst, /Do NOT issue directive verdicts/);
+  const analystSettings = await agent().get('/api/settings');
+  assert.equal(analystSettings.body.providers.llm_endpoint.advisor_mode, 'analyst');
+  assert.doesNotMatch(analystSettings.body.providers.llm_endpoint.advisor_mode_note, /default/i);
 
   // An unrecognised value falls back to advisor (the owner's default intent).
   process.env['CIVICFOLIO_ADVISOR_MODE'] = 'yolo';
@@ -575,35 +640,6 @@ test('fundamentals endpoint: 400 on missing ticker, 404 with reason on invalid/u
 
 
 
-test('model failover: ranks candidates and recognises unavailable models', async () => {
-  const { rankModels, isModelUnavailable } = await import('../src/ollamaAgent.js');
-
-  // Explicit config wins outright.
-  assert.deepEqual(rankModels(['a:cloud', 'b'], 'pinned:model'), ['pinned:model']);
-  assert.deepEqual(rankModels(['a:cloud', 'b'], '   '), ['a:cloud', 'b']);
-
-  // Cloud first (stronger), local after (never rate-limited) — so a cloud
-  // limit falls back to something that still answers.
-  assert.deepEqual(
-    rankModels(['gemma4:e2b', 'gpt-oss:120b-cloud', 'glm-5.3-flash:cloud']),
-    ['gpt-oss:120b-cloud', 'glm-5.3-flash:cloud', 'gemma4:e2b'],
-  );
-  assert.deepEqual(rankModels([]), []);
-
-  // Errors that mean "try the next model" rather than "give up".
-  for (const e of [
-    'you (gio5) have reached your session usage limit, upgrade for higher limits',
-    'Unauthorized',
-    'model not found',
-    'quota exceeded',
-  ]) assert.equal(isModelUnavailable(e), true, e);
-
-  // A genuine fault must NOT be mistaken for an unavailable model.
-  for (const e of ['agent request timed out', 'connection refused', 'invalid json']) {
-    assert.equal(isModelUnavailable(e), false, e);
-  }
-});
-
 test('chat history can be cleared without wiping the store', async () => {
   await postJson('/api/watchlist', { ticker: 'NVDA', thesis: 'keep an eye on it' });
   await postJson('/api/chat', { question: 'show my watchlist' });
@@ -622,47 +658,8 @@ test('chat history can be cleared without wiping the store', async () => {
   assert.equal(again.body.removed, 0);
 });
 
-test('repairJson closes brackets small models leave unbalanced', async () => {
-  const { repairJson } = await import('../src/ollamaAgent.js');
-  const ok = (s: string) => JSON.parse(repairJson(s));
-
-  // The exact failure observed from gemma4:e2b: array closed with '}'.
-  const real = '{"verdict":"buy","risks":["Dependence on AI demand; earnings risk."}';
-  assert.equal(ok(real).verdict, 'buy');
-  assert.deepEqual(ok(real).risks, ['Dependence on AI demand; earnings risk.']);
-
-  // Plain truncation.
-  assert.deepEqual(ok('{"a":[1,2'), { a: [1, 2] });
-  assert.deepEqual(ok('{"a":{"b":1'), { a: { b: 1 } });
-  // Unterminated string.
-  assert.equal(ok('{"a":"unfinished').a, 'unfinished');
-  // Braces inside strings must not be counted as structure.
-  assert.equal(ok('{"a":"a } b ] c"').a, 'a } b ] c');
-  // Escaped quotes must not flip string state.
-  assert.equal(ok('{"a":"say \\"hi\\""').a, 'say "hi"');
-  // Already-valid JSON is returned untouched.
-  assert.equal(repairJson('{"a":1}'), '{"a":1}');
-});
-
-test('extractFirstObject ignores text appended after the JSON', async () => {
-  const { extractFirstObject } = await import('../src/ollamaAgent.js');
-
-  // The observed failure: a disclaimer trailing the object was being absorbed
-  // into the final field because extraction ran to the LAST brace.
-  const withTrailer = '{"a":1,"hold":"until earnings"}{\\text{Disclaimer: not advice}}';
-  assert.equal(extractFirstObject(withTrailer), '{"a":1,"hold":"until earnings"}');
-  assert.equal(JSON.parse(extractFirstObject(withTrailer)).hold, 'until earnings');
-
-  // Nested objects still come back whole.
-  assert.equal(extractFirstObject('{"a":{"b":[1,2]}} trailing'), '{"a":{"b":[1,2]}}');
-  // Braces inside strings are not structure.
-  assert.equal(extractFirstObject('{"a":"} not the end"} after'), '{"a":"} not the end"}');
-  // Unbalanced input is handed on untouched for repairJson to close.
-  assert.equal(extractFirstObject('{"a":[1'), '{"a":[1');
-});
-
 test('verifyLevels catches levels the data does not support', async () => {
-  const { verifyLevels } = await import('../src/ollamaAgent.js');
+  const { verifyLevels } = await import('../src/researchAgent.js');
   // Real anchors observed for AMD.
   const anchors = { current_price: 508.38, sma20: 477.14, sma50: 499.01, six_month_high: 580.91, six_month_low: 193.39 };
 

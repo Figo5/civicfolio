@@ -2,7 +2,7 @@
 // chat intent boundary, migration, and no-broker/no-secret guarantees.
 //
 // Zero real network or model calls: quotes are injected via the seam, the
-// research agent's daemon host is unreachable, and storage is an isolated
+// no OPENAI_API_KEY is visible so model calls fail closed, and storage is an isolated
 // temp dir (CIVICFOLIO_DATA_DIR). A manual clock makes run records
 // deterministic.
 
@@ -14,7 +14,10 @@ import path from 'node:path';
 
 const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'civicfolio-fund-'));
 process.env['CIVICFOLIO_DATA_DIR'] = testDir;
-process.env['OLLAMA_AGENT_HOST'] = 'http://127.0.0.1:9'; // unreachable on purpose
+// AI paths are off in tests: a developer's real key must never turn this
+// suite into paid OpenAI calls. Nothing here injects a provider, so every
+// model call fails closed before the network.
+delete process.env['OPENAI_API_KEY'];
 // Historical log fixture for the import test (production reads ~/.civicfolio).
 const fundLogFixture = path.join(testDir, 'fund.log');
 fs.writeFileSync(fundLogFixture, [
@@ -32,6 +35,17 @@ const { parseFundLogLine, importFundLog } = await import('../src/fundLogImport.j
 const { runFundLoop } = await import('../src/fundLoop.js');
 const { finalizeInterruptedRuns, startFundRun } = await import('../src/fundRuns.js');
 const { clearQuoteCacheForTests } = await import('../src/quotes.js');
+const { setProviderForTests } = await import('../src/provider.js');
+
+// AI is "configured" for this suite but every model call fails, so the loop's
+// deterministic half (marking, stops, min-hold, scan) is exercised in full
+// while research reliably returns a failure — the same shape as an unreachable
+// model, with zero network.
+setProviderForTests({
+  model: 'stub-model',
+  generateText: async () => ({ ok: false, error: 'stub provider: no model call in tests' }),
+  generateStructured: async () => ({ ok: false, error: 'stub provider: no model call in tests' }),
+});
 import type { Quote, QuoteFailure } from '../src/quotes.js';
 import request from 'supertest';
 

@@ -1,3 +1,7 @@
+# Archived milestone request (historical)
+
+> This file records the completed 2026-09-08 research-only milestone. It is not current setup or operational guidance; see `README.md` and `HANDOFF.md`.
+
 # Civicfolio: finish the research-only product
 
 User explicitly authorizes removing all brokerage functionality and making a fully usable localhost research agent. Astra has already POSTed /api/robinhood/disconnect and verified connected:false. Do not read token/credential files, reconnect, revoke using guessed endpoints, place trades, or send any private financial data anywhere. Do not touch FairwayOS. Current main starts at 141b40d, clean. Preserve existing user research/chat/journal data. No reset/demo reseeding. Use this project only. You are the GLM implementation worker; do not delegate or use browser tools. Astra handles browser review. No commits/push until Astra reviews.

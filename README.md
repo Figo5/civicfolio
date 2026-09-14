@@ -12,6 +12,8 @@ The experimental Robinhood Trading-MCP integration was **removed** at the owner'
 
 ```bash
 npm install
+cp .env.example .env
+# Edit .env and set OPENAI_API_KEY. OPENAI_MODEL is optional.
 npm run build        # type-checks and builds the frontend into dist/
 npm start            # serves API + built UI on http://127.0.0.1:8787
 ```
@@ -47,7 +49,7 @@ Do NOT `kill` by port without checking what owns it first.
 - **Today's ideas** — a deterministic screen (no AI) over the live market: volume surges, 52-week range position, earnings proximity. Every rule that fired is shown; it is a shortlist, not a recommendation.
 - **Movers** — most active / gainers / losers, with per-quote delay timestamps.
 - **Ticker detail** — any symbol: delayed quote, SMAs, 52-week range, headlines, SEC-filed fundamentals, and **Research with AI**.
-- **Research with AI** — the Ollama-backed agent gets live quotes + history + headlines + SEC figures + web-search results and returns a hypothesis: view, entry/target/stop levels, reasoning, risks, and the references it actually retrieved. Every stated level is re-checked against the data the app supplied ("anchor match" vs "unsupported"). Data availability per source (with timestamps) is shown next to the answer.
+- **Research with AI** — the OpenAI-backed agent gets live quotes + history + headlines + SEC figures + web-search results and returns a hypothesis: view, entry/target/stop levels, reasoning, risks, and the references it actually retrieved. Every stated level is re-checked against the data the app supplied ("anchor match" vs "unsupported"). Data availability per source (with timestamps) is shown next to the answer.
 - **Chat** — per-ticker threads (or General) with the same research pipeline. Follow-ups carry bounded same-thread context. Responses display the model used and when.
 - **Research journal** — every research result is logged with its evidence state; the journal shows what the price did since. **Descriptive only — not a benchmark, not strategy performance.**
 
@@ -58,13 +60,15 @@ Do NOT `kill` by port without checking what owns it first.
 | Public Yahoo endpoint | quotes, history, movers, headlines | **Delayed, unofficial**; no continuity guarantee; each quote carries its own timestamp |
 | SEC EDGAR | as-filed annual figures | Months old; filing date shown |
 | DuckDuckGo (keyless) | web search results | Titles + snippets only; full articles are not read |
-| Ollama (local daemon → cloud model) | research/chat | **External processing** — see below |
+| OpenAI (server-side API key) | research/chat | **External processing** — see below |
 
 Quotes as-of missing ⇒ timestamp shown as **unknown**, never "now". A failed source is shown as failed; if every source fails, the model is **not invoked** and you get an explicit error instead of a hallucinated answer.
 
 ## Privacy / external processing
 
-Although the app runs on localhost, AI research and LLM chat send your question (plus fetched market data and, inside a ticker thread, that thread's recent messages) to the configured cloud model endpoint and — for research — to a web-search provider. **The raw question text is sent to search.** No portfolio, positions, notes, or other threads are ever sent. No API key is stored by this app; the local Ollama daemon's own cloud sign-in is the transport. Set `OPENAI_API_KEY` (server env only) to route chat through an OpenAI-compatible endpoint instead.
+Although the app runs on localhost, AI research and LLM chat send your question (plus fetched market data and, inside a ticker thread, that thread's recent messages) to **OpenAI**, and — for research and chat — the raw question text to **DuckDuckGo**. No portfolio, positions, notes, or other threads are ever sent.
+
+`OPENAI_API_KEY` is read from server env only. `npm start` and `npm run dev` load the repository `.env`; the launchd-compatible fallback `~/.civicfolio/env` is also loaded, with existing process/repository environment values taking precedence. Neither file is tracked. The key is never sent to the browser or written into responses. With no key set, AI research and LLM chat fail immediately with an explicit error — no network call is attempted — and the deterministic engine keeps working fully offline.
 
 ## Configuration
 
@@ -73,13 +77,14 @@ No secrets in the browser, ever. Relevant env (server-side only):
 - `CIVICFOLIO_DATA_DIR` — data directory (default `~/.civicfolio`)
 - `CIVICFOLIO_PORT` — default 8787
 - `CIVICFOLIO_ADVISOR_MODE` — `advisor` (default) or `analyst` (no directional lean)
-- `OLLAMA_AGENT_MODEL`, `OLLAMA_AGENT_HOST` — model routing
-- `OPENAI_API_KEY` — optional OpenAI-compatible chat endpoint
+- `OPENAI_API_KEY` — **required for AI research and LLM chat.** Without it those paths are disabled; everything else still works.
+- `OPENAI_MODEL` — optional, default `gpt-4o-mini`
 
 ## Tests
 
 ```bash
-npm test        # unit tests — mocked fetch, unreachable daemon, isolated temp data dir; no real network or model calls
+npm test        # unit tests — mocked fetch, injected LLM provider, isolated temp data dir; no real network or model calls
+                # (OPENAI_API_KEY is cleared in-process, so a developer key can never cause a paid call)
 npm run smoke   # boots a server on an isolated port + temp data dir; never reads ~/.civicfolio/env
 npm run typecheck
 npm run build

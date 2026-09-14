@@ -9,7 +9,8 @@ import { getQuotes } from './quotes.js';
 import { getMovers, getPriceHistory, getTickerNews, type MoverKind } from './market.js';
 import { buildInsights } from './insights.js';
 import { getFundamentals } from './fundamentals.js';
-import { runResearchAgent, getAgentConfig, verifyLevels, webSearch, type AgentSources } from './ollamaAgent.js';
+import { runResearchAgent, verifyLevels, webSearch, type AgentSources } from './researchAgent.js';
+import { isProviderConfigured, MISSING_KEY_ERROR } from './provider.js';
 import { runFundLoop } from './fundLoop.js';
 import { activeRun, finalizeInterruptedRuns } from './fundRuns.js';
 import { refreshFundMarks, fundEquity, positionView, marksAreStale } from './aiFund.js';
@@ -140,7 +141,8 @@ export function createApp(): express.Express {
         chat_messages: d.chat.length,
       },
       data_dir: dataDir(),
-      agent: getAgentConfig(),
+      // Presence and model only — never the key, never the endpoint.
+      agent: { enabled: getLlmConfig().enabled, model: getLlmConfig().model, provider: 'openai' },
       market_source: 'Live exchange data via a public endpoint; each quote reports its own delay.',
       robinhood: { status: 'removed', execution_enabled: false, note: 'Brokerage integration has been removed. Civicfolio is research-only: it places no orders and connects to no broker. Local credentials were deleted; provider-side grant revocation is NOT verified — review connected apps in your brokerage.' },
     });
@@ -163,7 +165,7 @@ export function createApp(): express.Express {
 
   // What's trending across the stored window: most bought/sold, by volume, top filers.
 
-  // Deep research on one ticker: Ollama Cloud agent with web search.
+  // Deep research on one ticker: OpenAI research agent over app-side search.
   // Results cached ~6h per ticker; verdicts labeled with model + timestamp.
   // Data availability is measured BEFORE the model runs: if no source answers,
   // the model is never invoked — an honest unavailable answer beats a
@@ -171,10 +173,7 @@ export function createApp(): express.Express {
   const researchCache = new Map<string, { at: number; verdict: unknown }>();
   const RESEARCH_TTL = 6 * 60 * 60 * 1000;
   app.post('/api/research/:ticker', async (req, res) => {
-    const cfg = getAgentConfig();
-    if (!cfg.enabled) {
-      return fail(res, 400, 'Research agent is disabled: start the Ollama daemon or set OLLAMA_API_KEY.');
-    }
+    if (!isProviderConfigured()) return fail(res, 400, MISSING_KEY_ERROR);
     const ticker = String(req.params.ticker ?? '').trim().toUpperCase();
     if (!/^[A-Z]{1,10}$/.test(ticker)) return fail(res, 400, 'invalid ticker');
 
@@ -209,7 +208,9 @@ export function createApp(): express.Express {
       fundamentals: 'cik' in fund
         ? { available: true, as_of: fund.source_filed ?? null, note: `${fund.source_form ?? 'filing'} filed ${fund.source_filed ?? 'date unknown'} (as-filed, possibly months old)` }
         : { available: false, reason: fund.reason },
-      web_search: { available: cfg.searchEnabled, reason: cfg.searchEnabled ? null : 'no search provider configured' },
+      // Keyless DuckDuckGo is always attempted; whether it actually answered
+      // is only known after the agent runs, so this is corrected below.
+      web_search: { available: false, reason: 'not yet attempted' } as { available: boolean; reason: string | null },
     };
     const coreOk = dataSources.quote.available || dataSources.price_history.available;
     if (!coreOk) {
@@ -262,6 +263,10 @@ export function createApp(): express.Express {
       fundamentals_summary: fundSummary,
     });
     if (!result.ok) return fail(res, 502, result.error);
+    // Honest after the fact: search is reported available only if it answered.
+    dataSources.web_search = result.retrievedSources.length > 0
+      ? { available: true, reason: null }
+      : { available: false, reason: 'no search results retrieved' };
 
     // Re-derive every stated level from the data we supplied. A model that
     // names an anchor and then quotes a different number must not have that
@@ -405,7 +410,7 @@ export function createApp(): express.Express {
         last_at: all.filter((m) => m.ticker === t).slice(-1)[0]?.ts ?? null,
       }))
       .sort((a, b) => String(b.last_at).localeCompare(String(a.last_at)));
-    res.json({ mode_available: getLlmConfig().enabled || getAgentConfig().enabled, ticker: ticker || null, messages: messages.slice(-100), threads });
+    res.json({ mode_available: getLlmConfig().enabled, ticker: ticker || null, messages: messages.slice(-100), threads });
   });
 
   app.post('/api/chat', async (req, res) => {
@@ -420,10 +425,7 @@ export function createApp(): express.Express {
 
     if (mode === 'llm') {
       const cfg = getLlmConfig();
-      const agent = getAgentConfig();
-      if (!cfg.enabled && !agent.enabled) {
-        return fail(res, 400, 'LLM mode not configured on the server (start the Ollama daemon or set OPENAI_API_KEY).');
-      }
+      if (!isProviderConfigured()) return fail(res, 400, MISSING_KEY_ERROR);
       // FUND INTENT: strict classification. Execution requires an affirmative
       // imperative ("run the paper fund"); questions and negations ("Did you
       // run the fund?", "Don't run the fund", "what did the fund do today?")
@@ -501,7 +503,6 @@ export function createApp(): express.Express {
         const movers = await getMovers('most_actives', 6).catch(() => []);
         focusTickers = movers.slice(0, 6).map((m) => m.ticker);
       }
-      const apiKey = process.env.OLLAMA_API_KEY?.trim() || '';
 
       // Availability of every source this request touches, measured before the
       // model runs. Nothing here claims "fetched" when it failed, and a quote
@@ -571,7 +572,7 @@ export function createApp(): express.Express {
             const searches = [question.slice(0, 200)];
             for (const t of focusTickers.slice(0, 2)) searches.push(`${t} stock news this week`);
             for (const q of searches.slice(0, 3)) {
-              const r = await webSearch(q, apiKey).catch(() => [] as AgentSources[]);
+              const r = await webSearch(q).catch(() => [] as AgentSources[]);
               for (const s of r.slice(0, 4)) if (s.url) results.set(s.url, s);
               if (results.size >= 8) break;
             }
@@ -914,10 +915,10 @@ export function createApp(): express.Express {
           note: 'Local deterministic engine. No API key, no external calls.',
         },
         research_agent: {
-          status: getAgentConfig().enabled ? 'configured' : 'not_configured',
-          model: getAgentConfig().model,
-          web_search: getAgentConfig().searchEnabled,
-          note: 'Research runs through the local Ollama daemon signed into Ollama Cloud. Prompts are processed by the cloud model even though this app runs on localhost — nothing is executed by the model and no orders are possible. Web search (when enabled) sends the research question to the search provider.',
+          status: llm.enabled ? 'configured' : 'not_configured',
+          model: llm.model,
+          web_search: true,
+          note: 'Research runs on OpenAI via a server-side API key. Prompts are processed by OpenAI even though this app runs on localhost — nothing is executed by the model and no orders are possible. Web search sends the research question to DuckDuckGo.',
         },
         llm_endpoint: {
           status: llm.enabled ? 'configured' : 'not_configured',
@@ -926,11 +927,10 @@ export function createApp(): express.Express {
           advisor_mode: llm.advisorMode,
           advisor_mode_note: llm.advisorMode === 'advisor'
             ? 'Advisor mode: direct, evidence-backed research view. Set by you in server env.'
-            : 'Analyst mode (default): lays out considerations without directive calls. Set CIVICFOLIO_ADVISOR_MODE=advisor to change.',
-          base_url_when_configured: llm.enabled ? llm.baseUrl : undefined,
+            : 'Analyst mode: lays out considerations without directive calls. Set CIVICFOLIO_ADVISOR_MODE=advisor to change.',
           note: llm.enabled
-            ? 'OpenAI-compatible endpoint configured via server env. Key never exposed to the frontend. Only a minimized disclosure summary is sent (never your ideas, watchlist, trades, or portfolio); content is delimited as untrusted data and citations are limited to records actually present in the context.'
-            : 'Set OPENAI_API_KEY (and optionally OPENAI_BASE_URL / OPENAI_MODEL) in server env to enable. Never in browser storage.',
+            ? 'OpenAI configured via server env. Key never exposed to the frontend. Only a minimized disclosure summary is sent (never your ideas, watchlist, trades, or portfolio); content is delimited as untrusted data and citations are limited to records actually present in the context.'
+            : 'Set OPENAI_API_KEY (and optionally OPENAI_MODEL) in server env to enable. Never in browser storage.',
         },
       },
       data: { dir: dataDir() },

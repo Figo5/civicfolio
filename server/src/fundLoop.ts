@@ -9,11 +9,12 @@
 
 import { randomUUID } from 'node:crypto';
 import type { AppData, VerdictLogEntry } from './types.js';
-import type { AgentVerdict } from './ollamaAgent.js';
+import type { AgentVerdict } from './researchAgent.js';
 import { getQuotes } from './quotes.js';
 import { getMovers, getMoversStrict, getPriceHistory, getTickerNews } from './market.js';
 import { getFundamentals } from './fundamentals.js';
-import { runResearchAgent, getAgentConfig } from './ollamaAgent.js';
+import { runResearchAgent } from './researchAgent.js';
+import { getProvider, isProviderConfigured, MISSING_KEY_ERROR } from './provider.js';
 import { planTradeFromVerdict, executeAiTrade, fundEquity, lessonsBlock, daysSince, lastSellOf, refreshFundMarks, marksAreStale, MIN_HOLD_DAYS, REBUY_COOLDOWN_DAYS, type PlannedTrade } from './aiFund.js';
 import { update, load } from './store.js';
 import { startFundRun, activeRun, finalizeInterruptedRuns } from './fundRuns.js';
@@ -73,12 +74,12 @@ interface LoopCtx {
 
 /** The actual research -> decide -> execute -> reflect pass. */
 async function loopBody(ctx: LoopCtx): Promise<void> {
-  const cfg = getAgentConfig();
-  ctx.setModel(cfg.model ?? null);
-  if (!cfg.enabled) {
-    ctx.addFailures([{ kind: 'model', note: 'no model transport available' }]);
-    throw new Error('no model transport available');
+  if (!isProviderConfigured()) {
+    ctx.setModel(null);
+    ctx.addFailures([{ kind: 'model', note: MISSING_KEY_ERROR }]);
+    throw new Error(MISSING_KEY_ERROR);
   }
+  ctx.setModel(getProvider().model);
 
   // ---- 0. Marking pass: refresh marks for held positions (no trading) -----
   const markRes = await refreshFundMarks();
@@ -312,13 +313,14 @@ async function reflectOnClosedTrades(): Promise<LoopResult['actions']> {
       `Exit rationale was: ${t.rationale}`,
       'Reply with ONLY the lesson sentence. No preamble.',
     ].join('\n');
-    const cfg = getAgentConfig();
-    const { chatOnce } = await import('./ollamaAgent.js');
-    const res = await chatOnce(cfg.model, process.env.OLLAMA_API_KEY?.trim() || '', [
-      { role: 'user', content: prompt },
-    ], false);
-    const lesson = res.message?.content?.trim().slice(0, 300);
-    if (res.error || !lesson) { actions.push({ ticker: t.ticker, action: 'reflect-failed', detail: res.error ?? 'empty reflection' }); continue; }
+    const res = await getProvider().generateText({
+      system: 'You extract one short, concrete trading lesson from a closed paper trade. Reply with the lesson sentence only.',
+      user: prompt,
+      temperature: 0.2,
+      maxOutputTokens: 200,
+    });
+    const lesson = res.ok ? res.content.trim().slice(0, 300) : '';
+    if (!lesson) { actions.push({ ticker: t.ticker, action: 'reflect-failed', detail: res.ok ? 'empty reflection' : res.error }); continue; }
     update((draft) => {
       draft.ai_lessons.unshift({ id: randomUUID(), ticker: t.ticker, trade_id: t.id, lesson, closed_at: new Date().toISOString() });
       draft.ai_lessons = draft.ai_lessons.slice(0, 100);
