@@ -188,6 +188,40 @@ floor. That fix was made after the live run and is covered by mocked tests only.
 
 One ticker is an anecdote, not a measurement of quality.
 
+## Trying it: the isolated preview
+
+The experiment runs in its own Git worktree, on its own port, against its own
+data directory. Production is untouched.
+
+```bash
+cd ~/Documents/Codex/civicfolio-experiment
+npm ci && npm run build          # first time only
+./scripts/preview.sh start       # -> http://127.0.0.1:8788
+./scripts/preview.sh status
+./scripts/preview.sh stop
+```
+
+Open **http://127.0.0.1:8788**, click any ticker, and use the
+**"Deep Research (exp.)"** button next to "Research with AI".
+
+Why it is safe to leave running:
+
+| | production | preview |
+|---|---|---|
+| port | 8787 | 8788 |
+| data dir | `~/.civicfolio` | `~/.civicfolio-preview` |
+| branch | `main` | `experiment/verified-research` |
+| Deep Research | absent | enabled |
+
+The paper-fund scheduler (launchd `local.civicfolio.fund`) posts to
+`127.0.0.1:8787` and only there, with its working directory set to the
+production checkout, so it can never drive a run inside the preview. The preview
+starts with an empty store — no portfolio, trades or positions are copied from
+production. `preview.sh` refuses to start on port 8787 or against the
+production data directory. The OpenAI key is read from the existing server-side
+env file at launch and exported to that process only; it is never written to a
+tracked file or printed.
+
 ## Verification
 
 ```
@@ -208,6 +242,41 @@ is the invariant worth pinning.
 
 All automated tests are hermetic: the collector and the provider are injected,
 `OPENAI_API_KEY` is deleted in the test setup, and no test makes a paid call.
+
+## Live preview trial (one company, AMD)
+
+Both paths were run through the preview's real HTTP endpoints against the same
+company at the same time.
+
+| | baseline `/api/research/AMD` | experiment |
+|---|---|---|
+| model calls | 1 | 2 |
+| wall latency | ~5s | ~19s |
+| tokens (reported) | not reported by that path | 6,374 in / 1,390 out |
+| claims shown | 6 | 10 |
+| claims carrying citations | 0 (no such field exists) | 10 / 10 |
+| figures unsupported by evidence | 0 | 0 (4 claims removed before display) |
+| gaps explicitly named | 0 (no such field) | 3 |
+| identity | not resolved | OK, ADVANCED MICRO DEVICES INC, NMS, USD |
+
+**Read this honestly.** On this run the baseline invented nothing — it stated
+six figures, all supported, and set no price levels. The experiment's advantage
+here was *not* fewer wrong numbers; it was per-claim citations, named gaps, an
+explicitly resolved identity, and the application removing four claims the
+evidence did not support. It cost 2x the calls and ~4x the latency. One company,
+one run, is an anecdote.
+
+The reviewer raised four issues (wrong-entity framing, stale filings,
+missing single-source-identity context, an overstatement), and the application
+removed a "+3% rebound" claim that the packet does not contain — the real move
+implied by the packet is +2.19%.
+
+**A defect the trial found.** The validator read `10-K` as the figure `10` and
+therefore deleted two correct, useful risk claims ("figures come from a 10-K
+filed February 2026"). `statedNumbers` now skips tokens that are identifiers
+rather than quantities (`10-K`, `Q3`), scanning the whole whitespace-delimited
+token in both directions. Tests pin that a 10-K claim survives while an invented
+`3%` is still caught. 160 tests pass.
 
 ## Limitations
 

@@ -206,6 +206,12 @@ function toIssues(v: unknown): ReviewIssue[] {
 // invented. Measured against the live run that first exposed this.
 const NUM_RE = /(-?\d+(?:,\d{3})*(?:\.\d+)?)\s*(%|billion|bn\b|million|mn\b|trillion|thousand)?/gi;
 
+// Identifiers that merely contain digits are not figures. Found in the live
+// trial: "a 10-K filed in February 2026" was read as the number 10, which the
+// packet does not contain, so two correct and useful risk claims were removed.
+// A form name, a quarter, or a ticker-like token carries no quantity to check.
+const NOT_A_FIGURE = /^(?:\d+-[A-Za-z]|Q[1-4]|[A-Za-z]+\d+)$/;
+
 const SCALE: Record<string, number> = {
   thousand: 1e3, million: 1e6, mn: 1e6, billion: 1e9, bn: 1e9, trillion: 1e12,
 };
@@ -218,6 +224,13 @@ export function statedNumbers(text: string): StatedNumber[] {
   for (const m of text.matchAll(NUM_RE)) {
     const base = Number(m[1].replace(/,/g, ''));
     if (!Number.isFinite(base)) continue;
+    // Look at the whole whitespace-delimited token this number sits in --
+    // scanning backwards too, or "Q3" would be read as the token "3".
+    const start = m.index ?? 0;
+    let from = start;
+    while (from > 0 && !/\s/.test(text[from - 1])) from -= 1;
+    const token = (text.slice(from).match(/^\S+/)?.[0] ?? '').replace(/[.,;:)]+$/, '');
+    if (NOT_A_FIGURE.test(token)) continue;
     const suffix = (m[2] ?? '').toLowerCase().replace(/\b/g, '');
     const isPercent = suffix === '%';
     const value = isPercent ? base : base * (SCALE[suffix] ?? 1);

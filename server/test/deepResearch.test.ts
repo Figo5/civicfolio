@@ -437,3 +437,32 @@ test('validation: a small bare number in billions is checked, not skipped', asyn
   }) as never, p);
   assert.match(r.validation.unsupported_numbers.join(' '), /4\.34/);
 });
+
+// ---- identifiers are not figures (found in the live preview trial) --------
+
+test('statedNumbers ignores SEC form names and quarter labels', () => {
+  const got = D.statedNumbers('The 10-K filed in Q3 reports revenue of 25.8 billion USD.');
+  assert.deepEqual(got.map((n) => n.value), [25.8e9],
+    '"10-K" and "Q3" are identifiers, not quantities');
+});
+
+test('validation: a claim about a 10-K filing is not removed as an invented number', async () => {
+  useCase('ordinary_supported');
+  const p = await E.buildEvidencePacket('AMD');
+  const r = D.validateReport(report({
+    risks: [claim('The financial figures come from a 10-K filed in February 2026 and '
+                  + 'may be several months old.', ['E8'])],
+  }) as never, p);
+  assert.equal(r.report.risks.length, 1, 'a correct, useful risk must survive');
+  assert.equal(r.validation.unsupported_numbers.length, 0);
+});
+
+test('validation: a real invented percentage is still caught', async () => {
+  useCase('ordinary_supported');
+  const p = await E.buildEvidencePacket('AMD');
+  const r = D.validateReport(report({
+    what_changed: [claim('The stock rebounded by 3% recently.', ['E1'])],
+  }) as never, p);
+  assert.match(r.validation.unsupported_numbers.join(' '), /3%/);
+  assert.equal(r.report.what_changed.length, 0);
+});
