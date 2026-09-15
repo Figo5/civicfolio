@@ -6,9 +6,25 @@ dist/
 *.tsbuildinfo
 
 # Environment / secrets (never commit)
+#
+# Deny every .env variant, then re-allow only the sanitized templates. The
+# previous rules listed variants individually, so a local backup such as
+# .env.save or .env.bak was NOT ignored and was one `git add -A` away from
+# being committed. Deny-by-default is the only version of this that stays
+# correct when someone invents a new suffix.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Belt and braces for backup suffixes an editor or shell may append to the
+# template itself (.env.example~, .env.example.bak are NOT sanitized copies).
+.env.example.*
+.env.sample.*
+.env.template.*
+*.env
+*~
 
 # Local app data lives OUTSIDE the repo by default (~/.civicfolio).
 # If you ever point CIVICFOLIO_DATA_DIR into the repo, keep it ignored:
