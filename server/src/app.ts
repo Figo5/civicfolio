@@ -11,6 +11,7 @@ import { buildInsights } from './insights.js';
 import { getFundamentals } from './fundamentals.js';
 import { runResearchAgent, verifyLevels, webSearch, type AgentSources } from './researchAgent.js';
 import { isProviderConfigured, MISSING_KEY_ERROR } from './provider.js';
+import { runDeepResearch, isDeepResearchEnabled } from './deepResearch.js';
 import { runFundLoop } from './fundLoop.js';
 import { activeRun, finalizeInterruptedRuns } from './fundRuns.js';
 import { refreshFundMarks, fundEquity, positionView, marksAreStale } from './aiFund.js';
@@ -144,6 +145,12 @@ export function createApp(): express.Express {
       // Presence and model only — never the key, never the endpoint.
       agent: { enabled: getLlmConfig().enabled, model: getLlmConfig().model, provider: 'openai' },
       market_source: 'Live exchange data via a public endpoint; each quote reports its own delay.',
+      // Experimental, off by default, read-only. The UI uses this to decide
+      // whether to offer the entry point at all.
+      deep_research_experiment: {
+        enabled: isDeepResearchEnabled(),
+        note: 'TradingAgents-inspired researcher+reviewer over a verified evidence packet. Read-only research: it places no orders and cannot touch the paper fund.',
+      },
       robinhood: { status: 'removed', execution_enabled: false, note: 'Brokerage integration has been removed. Civicfolio is research-only: it places no orders and connects to no broker. Local credentials were deleted; provider-side grant revocation is NOT verified — review connected apps in your brokerage.' },
     });
   });
@@ -170,6 +177,54 @@ export function createApp(): express.Express {
   // Data availability is measured BEFORE the model runs: if no source answers,
   // the model is never invoked — an honest unavailable answer beats a
   // confident fabrication.
+  // ---- EXPERIMENTAL: Deep Research (flag-gated, read-only) ----
+  //
+  // Off unless CIVICFOLIO_DEEP_RESEARCH is set. It returns a research report
+  // and nothing else: no order, no portfolio write, no paper-fund decision, no
+  // schedule. See docs/DEEP_RESEARCH_EXPERIMENT.md.
+  //
+  // In-flight requests are shared rather than duplicated, so double-clicking
+  // the button cannot spend a second pair of model calls.
+  const deepCache = new Map<string, { at: number; result: unknown }>();
+  const deepInflight = new Map<string, ReturnType<typeof runDeepResearch>>();
+  const DEEP_TTL = 6 * 60 * 60 * 1000;
+
+  app.post('/api/experiment/deep-research/:ticker', async (req, res) => {
+    if (!isDeepResearchEnabled()) {
+      return fail(res, 404, 'The Deep Research experiment is not enabled on this server.');
+    }
+    const ticker = String(req.params.ticker ?? '').trim().toUpperCase();
+    if (!/^[A-Z]{1,10}$/.test(ticker)) return fail(res, 400, 'invalid ticker');
+    const cutoff = typeof req.body?.cutoff === 'string' && req.body.cutoff.trim() !== ''
+      ? req.body.cutoff.trim() : null;
+    const key = `${ticker}:${cutoff ?? 'live'}`;
+
+    const hit = deepCache.get(key);
+    if (hit && Date.now() - hit.at < DEEP_TTL) {
+      return res.json({ ...(hit.result as object), cached: true });
+    }
+
+    let work = deepInflight.get(key);
+    if (!work) {
+      work = runDeepResearch(ticker, { cutoff });
+      deepInflight.set(key, work);
+      work.finally(() => { deepInflight.delete(key); }).catch(() => {});
+    }
+
+    try {
+      const out = await work;
+      if (!out.ok) {
+        // The packet is returned on failure too: an unresolved identity is a
+        // useful answer, not an empty error.
+        return res.status(422).json({ error: out.error, packet: out.packet ?? null });
+      }
+      deepCache.set(key, { at: Date.now(), result: out.result });
+      res.json({ ...out.result, cached: false });
+    } catch (err) {
+      fail(res, 502, err instanceof Error ? err.message : 'deep research failed');
+    }
+  });
+
   const researchCache = new Map<string, { at: number; verdict: unknown }>();
   const RESEARCH_TTL = 6 * 60 * 60 * 1000;
   app.post('/api/research/:ticker', async (req, res) => {

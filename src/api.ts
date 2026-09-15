@@ -5,6 +5,64 @@ export interface Meta {
   data_dir: string;
   market_source: string;
   robinhood: { status: string; note: string };
+  /** Experimental, off by default. Absent on older servers. */
+  deep_research_experiment?: { enabled: boolean; note: string };
+}
+
+// ---- EXPERIMENTAL: Deep Research (flag-gated, read-only) ------------------
+
+export interface EvidenceItem {
+  id: string;
+  kind: 'quote' | 'levels' | 'fundamentals' | 'news' | 'web';
+  claim: string;
+  value: number | null;
+  unit: string | null;
+  source: string;
+  url: string | null;
+  published_at: string | null;
+  period_end: string | null;
+  retrieved_at: string;
+  limitations: string[];
+}
+
+export interface EvidencePacket {
+  identity: {
+    state: 'OK' | 'AMBIGUOUS' | 'UNRESOLVED';
+    ticker: string; company: string | null; exchange: string | null; currency: string | null;
+    candidates: { name: string; source: string }[];
+    conflicts: string[]; reason: string | null;
+  };
+  analysis_time: string;
+  items: EvidenceItem[];
+  missing: { kind: string; reason: string }[];
+  conflicts: string[];
+  point_in_time: { requested_cutoff: string | null; enforced: boolean; limitation: string | null };
+}
+
+export interface DeepClaim { text: string; evidence_ids: string[]; unsupported?: string[] }
+
+export interface DeepResult {
+  ticker: string;
+  packet: EvidencePacket;
+  report: {
+    situation: string;
+    supporting_case: DeepClaim[];
+    opposing_case: DeepClaim[];
+    risks: DeepClaim[];
+    what_changed: DeepClaim[];
+    unanswered_questions: string[];
+  };
+  review_issues: { kind: string; severity: string; detail: string; evidence_ids: string[] }[];
+  validation: {
+    ok: boolean; bad_citations: string[]; uncited_claims: string[];
+    unsupported_numbers: string[]; entity_problems: string[]; removed: string[]; notes: string[];
+  };
+  usage: { stage: string; model: string; input_tokens: number | null; cached_input_tokens: number | null; output_tokens: number | null; latency_ms: number }[];
+  cost: { currency: string; amount: number | null; basis: string };
+  model: string;
+  generated_at: string;
+  limitations: string[];
+  cached?: boolean;
 }
 
 export interface SettingsResponse {
@@ -88,8 +146,11 @@ function get<T>(url: string): Promise<T> {
   return fetch(url).then((r) => handle<T>(r));
 }
 
-function post<T>(url: string, body: unknown): Promise<T> {
-  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => handle<T>(r));
+function post<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  return fetch(url, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body), ...(signal ? { signal } : {}),
+  }).then((r) => handle<T>(r));
 }
 
 function del<T>(url: string): Promise<T> {
@@ -123,6 +184,9 @@ export const api = {
     get<{ kind: string; count: number; movers: Mover[]; fetched_at: string; note: string }>(
       `/api/market/movers?kind=${kind}&count=${count}`),
   snapshot: (ticker: string) => get<TickerSnapshot>(`/api/market/ticker/${encodeURIComponent(ticker)}`),
+  // Experimental; only called when meta.deep_research_experiment.enabled.
+  deepResearch: (ticker: string, signal?: AbortSignal) =>
+    post<DeepResult>(`/api/experiment/deep-research/${encodeURIComponent(ticker)}`, {}, signal),
   research: (ticker: string) =>
     post<{ verdict: AgentVerdict; cached: boolean; data_sources?: Record<string, DataSourceStatus>; source_note?: string }>(`/api/research/${encodeURIComponent(ticker)}`, {}),
   watchlist: () => get<{ items: { id: string; ticker: string; thesis: string }[] }>('/api/watchlist'),

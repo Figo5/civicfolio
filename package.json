@@ -12,7 +12,8 @@
     "typecheck": "tsc -b && tsc -p server/tsconfig.json --noEmit",
     "test": "node --import tsx --test server/test/*.test.ts",
     "start": "node --env-file-if-exists=.env --import tsx server/src/index.ts",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "eval:deep": "node --import tsx scripts/evalDeepResearch.mjs"
   },
   "dependencies": {
     "express": "^4.22.2",

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea, type DataSourceStatus } from '../api';
+import { api, type Mover, type TickerSnapshot, type AgentVerdict, type InsightBoard, type ScoredIdea, type DataSourceStatus, type DeepResult, type DeepClaim } from '../api';
 import { AiFund } from './AiFund';
 
 const MOVER_TABS = [
@@ -95,9 +95,24 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
   // Guards late responses: only the research run started for THIS ticker may
   // render its verdict into this view.
   const reqRef = useRef(0);
+  // --- experimental Deep Research. Off unless the server says it is enabled.
+  const [deepOn, setDeepOn] = useState(false);
+  const [deep, setDeep] = useState<DeepResult | null>(null);
+  const [deepBusy, setDeepBusy] = useState(false);
+  const [deepErr, setDeepErr] = useState<string | null>(null);
+  const deepAbort = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api.meta()
+      .then((m) => { if (live) setDeepOn(m.deep_research_experiment?.enabled === true); })
+      .catch(() => { /* the experiment simply stays hidden */ });
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     setSnap(null); setVerdict(null); setErr(null); setDataSources(null);
+    setDeep(null); setDeepErr(null);
     const id = ++reqRef.current;
     api.snapshot(ticker)
       .then((s) => { if (reqRef.current === id) setSnap(s); })
@@ -121,6 +136,26 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
     }
   };
 
+  // One run at a time: a second click joins nothing, it just cannot start a
+  // second pair of model calls.
+  const runDeep = async () => {
+    if (deepBusy) return;
+    const id = reqRef.current;
+    const ctrl = new AbortController();
+    deepAbort.current = ctrl;
+    setDeepBusy(true); setDeepErr(null);
+    try {
+      const r = await api.deepResearch(ticker, ctrl.signal);
+      if (reqRef.current === id) setDeep(r);
+    } catch (e) {
+      const msg = String((e as Error).message ?? e);
+      if (reqRef.current === id) setDeepErr(/abort/i.test(msg) ? 'Cancelled.' : msg);
+    } finally {
+      if (reqRef.current === id) setDeepBusy(false);
+      deepAbort.current = null;
+    }
+  };
+
   const checks = Object.fromEntries((verdict?.level_checks ?? []).map((c) => [c.field, c]));
   const style = verdict ? VERDICT_STYLE[verdict.verdict] : null;
 
@@ -135,6 +170,16 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
           <button className="btn small teal" type="button" onClick={runResearch} disabled={busy}>
             {busy ? 'Researching…' : 'Research with AI'}
           </button>
+          {deepOn && (
+            <button
+              className="btn small"
+              type="button"
+              onClick={deepBusy ? () => deepAbort.current?.abort() : runDeep}
+              title="Experimental: verified evidence packet, then a researcher and a reviewer. Read-only."
+            >
+              {deepBusy ? 'Cancel deep run' : 'Deep Research (exp.)'}
+            </button>
+          )}
           <button className="btn small" type="button" onClick={onClose}>Close</button>
         </div>
       </div>
@@ -202,6 +247,10 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
             </div>
           )}
 
+          {deepOn && (deepBusy || deepErr || deep) && (
+            <DeepPanel result={deep} busy={deepBusy} error={deepErr} />
+          )}
+
           {snap.news.length > 0 && (
             <>
               <p className="card-title" style={{ margin: '14px 0 6px' }}>Recent news</p>
@@ -233,6 +282,154 @@ function TickerDetail({ ticker, onClose }: { ticker: string; onClose: () => void
   );
 }
 
+
+// ---- EXPERIMENTAL: Deep Research panel ------------------------------------
+//
+// Read-only. It renders the reviewed report, what the application could not
+// verify, the dates behind the evidence, and what the run cost. Nothing here
+// can place a trade or touch the paper fund.
+
+function ClaimList({ title, claims, color }: { title: string; claims: DeepClaim[]; color?: string }) {
+  if (claims.length === 0) return null;
+  return (
+    <>
+      <p className="card-title" style={{ margin: '10px 0 4px', ...(color ? { color } : {}) }}>{title}</p>
+      <ul className="tight-list">
+        {claims.map((c, i) => (
+          <li key={i}>
+            {c.text}{' '}
+            <span className="muted">[{c.evidence_ids.join(', ') || 'uncited'}]</span>
+            {c.unsupported && c.unsupported.length > 0 && (
+              <span className="caution"> · unverified figure(s): {c.unsupported.join(', ')}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+function DeepPanel({ result, busy, error }: { result: DeepResult | null; busy: boolean; error: string | null }) {
+  if (busy) {
+    return (
+      <div className="verdict">
+        <p className="card-title" style={{ margin: 0 }}>Deep Research (experimental)</p>
+        <p className="muted">Resolving instrument, collecting evidence, then researcher and reviewer… This takes a minute or two.</p>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="verdict">
+        <p className="card-title" style={{ margin: 0 }}>Deep Research (experimental)</p>
+        <div className="error-text">{error}</div>
+      </div>
+    );
+  }
+  if (!result) return null;
+
+  const p = result.packet;
+  const tokens = result.usage.reduce(
+    (a, u) => ({ in: a.in + (u.input_tokens ?? 0), out: a.out + (u.output_tokens ?? 0) }),
+    { in: 0, out: 0 },
+  );
+  const latency = result.usage.reduce((a, u) => a + u.latency_ms, 0);
+
+  return (
+    <div className="verdict">
+      <div className="verdict-head">
+        <span className="verdict-badge" style={{ color: 'var(--text-dim)', borderColor: 'var(--text-dim)' }}>
+          EXPERIMENTAL
+        </span>
+        <span className="muted">
+          {p.identity.company ?? p.identity.ticker} · identity {p.identity.state} ·
+          {' '}model {result.model} · {new Date(result.generated_at).toLocaleString()}
+          {result.cached ? ' · cached' : ''}
+        </span>
+      </div>
+
+      <p className="verdict-summary">{result.report.situation}</p>
+
+      <ClaimList title="Supporting case" claims={result.report.supporting_case} />
+      <ClaimList title="Opposing case" claims={result.report.opposing_case} />
+      <ClaimList title="What changed" claims={result.report.what_changed} />
+      <ClaimList title="Risks" claims={result.report.risks} color="var(--red)" />
+
+      {result.report.unanswered_questions.length > 0 && (
+        <>
+          <p className="card-title" style={{ margin: '10px 0 4px' }}>The evidence does not answer</p>
+          <ul className="tight-list">
+            {result.report.unanswered_questions.map((q, i) => <li key={i}>{q}</li>)}
+          </ul>
+        </>
+      )}
+
+      {result.review_issues.length > 0 && (
+        <>
+          <p className="card-title" style={{ margin: '10px 0 4px' }}>Reviewer found</p>
+          <ul className="tight-list">
+            {result.review_issues.map((x, i) => (
+              <li key={i}><span className="muted">{x.severity} · {x.kind}</span> — {x.detail}</li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {!result.validation.ok && (
+        <>
+          <p className="card-title" style={{ margin: '10px 0 4px', color: 'var(--red)' }}>
+            The application could not verify
+          </p>
+          <ul className="tight-list">
+            {[...result.validation.entity_problems, ...result.validation.bad_citations,
+              ...result.validation.unsupported_numbers, ...result.validation.uncited_claims]
+              .slice(0, 8).map((x, i) => <li key={i} className="caution">{x}</li>)}
+          </ul>
+        </>
+      )}
+      {result.validation.removed.length > 0 && (
+        <p className="provenance">
+          {result.validation.removed.length} claim(s) were removed because the evidence did not support them.
+        </p>
+      )}
+
+      <p className="card-title" style={{ margin: '10px 0 4px' }}>Evidence</p>
+      <ul className="tight-list">
+        {p.items.slice(0, 20).map((it) => (
+          <li key={it.id}>
+            <span className="muted">[{it.id}] {it.kind}</span> {it.claim}
+            {' · '}
+            <span className="muted">
+              {it.published_at ? `published ${it.published_at.slice(0, 10)}` : 'publication date unknown'}
+              {it.period_end ? `, period ${it.period_end.slice(0, 10)}` : ''}
+              {`, retrieved ${it.retrieved_at.slice(0, 10)}`}
+            </span>
+            {it.url && <> · <a href={it.url} target="_blank" rel="noreferrer noopener">source</a></>}
+          </li>
+        ))}
+      </ul>
+
+      {p.missing.length > 0 && (
+        <p className="provenance">Missing: {p.missing.map((m) => `${m.kind} (${m.reason})`).join('; ')}</p>
+      )}
+
+      <p className="card-title" style={{ margin: '10px 0 4px' }}>Limitations</p>
+      <ul className="tight-list">
+        {result.limitations.slice(0, 8).map((l, i) => <li key={i} className="caution">{l}</li>)}
+      </ul>
+
+      <p className="provenance">
+        {result.usage.length} model call(s) · {tokens.in} input tokens ({result.usage.reduce((a, u) => a + (u.cached_input_tokens ?? 0), 0)} cached),
+        {' '}{tokens.out} output tokens · {(latency / 1000).toFixed(1)}s ·{' '}
+        {result.cost.amount === null ? `cost unknown (${result.cost.basis})` : `~${result.cost.amount.toFixed(4)} (${result.cost.basis})`}
+      </p>
+      <p className="provenance">
+        Experimental research output. Read-only: it places no orders and does not affect the paper fund.
+        Confidence is not quantified and no recommendation is implied.
+      </p>
+    </div>
+  );
+}
 
 function IdeaCard({ idea, onOpen }: { idea: ScoredIdea; onOpen: (t: string) => void }) {
   return (

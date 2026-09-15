@@ -76,3 +76,34 @@ Coordinator-run on the migration diff:
 - Provider-side revocation of the removed brokerage grant was never verified; review connected apps separately if still relevant
 
 Older milestone details remain available in Git history; this file is the current operational source of truth.
+
+## Experimental branch: Deep Research
+
+Branch `experiment/verified-research`. **Not merged. Off by default. Read-only.**
+`main` and the running service configuration are unchanged.
+
+A TradingAgents-inspired workflow: resolve instrument identity, build a verified
+evidence packet, then one researcher call and one reviewer call, with the
+application making the final decision about what is supported. Full write-up,
+including the reviewed upstream commit and the baseline comparison, is in
+`docs/DEEP_RESEARCH_EXPERIMENT.md`.
+
+Enable with `CIVICFOLIO_DEEP_RESEARCH=1` in server env; unset to disable. With
+the flag off the route returns 404, `/api/meta` reports it disabled, and the UI
+does not render the entry point.
+
+```
+npm test          # 152/152
+npm run typecheck # pass
+npm run build     # pass
+npm run smoke     # pass
+npm run eval:deep # baseline vs experiment, frozen evidence, no network
+```
+
+Ordinary chat, the baseline research route, and all paper-fund behaviour are
+unchanged; tests assert that a deep run leaves the portfolio, trade list and
+fund byte-identical, and that neither experiment module imports any trading or
+store module.
+
+Live API usage during this work: **2 OpenAI requests** (one AMD run, SDK retries
+disabled for the count). No paid search and no brokerage calls.

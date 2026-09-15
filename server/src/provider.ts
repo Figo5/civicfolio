@@ -38,12 +38,25 @@ export interface GenerateRequest {
   maxOutputTokens?: number;
 }
 
+/**
+ * Token accounting for one request, as reported by the provider.
+ *
+ * Reported, never derived: an estimate that looks like a measurement is worse
+ * than an absent number. `cached_input` is the prompt-cache hit portion when
+ * the provider reports it.
+ */
+export interface Usage {
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
+}
+
 export type TextResult =
-  | { ok: true; content: string; model: string }
+  | { ok: true; content: string; model: string; usage?: Usage }
   | { ok: false; error: string };
 
 export type StructuredResult =
-  | { ok: true; data: unknown; model: string }
+  | { ok: true; data: unknown; model: string; usage?: Usage }
   | { ok: false; error: string };
 
 export interface LLMProvider {
@@ -87,7 +100,7 @@ class OpenAIProvider implements LLMProvider {
       if (res.status === 'incomplete') return { ok: false, error: INCOMPLETE_RESPONSE_ERROR };
       const content = (res.output_text ?? '').trim();
       if (content === '') return { ok: false, error: 'The model returned an empty answer.' };
-      return { ok: true, content, model: res.model ?? this.model };
+      return { ok: true, content, model: res.model ?? this.model, usage: readUsage(res) };
     } catch (err) {
       return { ok: false, error: mapProviderError(err, this.model) };
     }
@@ -121,11 +134,26 @@ class OpenAIProvider implements LLMProvider {
       if (typeof data !== 'object' || data === null || Array.isArray(data)) {
         return { ok: false, error: MALFORMED_STRUCTURED_ERROR };
       }
-      return { ok: true, data, model: res.model ?? this.model };
+      return { ok: true, data, model: res.model ?? this.model, usage: readUsage(res) };
     } catch {
       return { ok: false, error: MALFORMED_STRUCTURED_ERROR };
     }
   }
+}
+
+/**
+ * Read the provider's own usage numbers. Absent fields stay null rather than
+ * becoming 0, so "not reported" is never displayed as "free".
+ */
+function readUsage(res: unknown): Usage {
+  const u = (res as { usage?: Record<string, unknown> } | null)?.usage;
+  const n = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const details = (u?.input_tokens_details ?? null) as Record<string, unknown> | null;
+  return {
+    input_tokens: n(u?.input_tokens),
+    cached_input_tokens: n(details?.cached_tokens),
+    output_tokens: n(u?.output_tokens),
+  };
 }
 
 export const MALFORMED_STRUCTURED_ERROR =
