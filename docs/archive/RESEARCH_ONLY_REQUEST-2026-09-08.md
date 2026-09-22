@@ -1,6 +1,6 @@
 # Archived milestone request (historical)
 
-> This file records the completed 2026-09-08 research-only milestone. It is not current setup or operational guidance; see `README.md` and `HANDOFF.md`.
+> This file records the completed 2026-09-08 research-only milestone. It is not current setup or operational guidance; see the [README](../../README.md) and [historical handoff](../development/handoff.md).
 
 # Civicfolio: finish the research-only product
 

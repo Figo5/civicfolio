@@ -1,12 +1,35 @@
 # Civicfolio
 
-A **personal, localhost-only stock research app**. It screens the live market, runs an AI research agent that cites its sources, and keeps a journal of what it said and what the price did after. It is **research-only**: it places no orders, connects to no broker, and holds no credentials.
+A **personal, localhost-only stock research app**. It screens the live market, runs an AI research agent that cites its sources, and keeps a journal of what it said and what the price did after. It is **research-only**: it places no orders, connects to no broker, and holds no brokerage credentials.
 
 > **Not investment advice.** All output is a research hypothesis generated from the data described below. Confidence is qualitative. Nothing here is a recommendation to trade.
+
+![Civicfolio research interface with clearly labeled fictional data](docs/media/research.png)
+
+*Illustrative UI fixture: fictional companies and values, no live data or AI call.
+The capture uses the built application with synthetic API responses.*
 
 ## Status: research-only (brokerage removed)
 
 The experimental Robinhood Trading-MCP integration was **removed** at the owner's request. All legacy `/api/robinhood/*` routes answer a static `410` with `execution_enabled: false` — they never read credentials, contact a broker, or redirect into an authorization flow. Local credential files were deleted. **Provider-side grant revocation was NOT verified** — check "Connected apps" in your brokerage account if you authorized this app previously.
+
+## Architecture
+
+TypeScript throughout: a React/Vite interface, a localhost Express API, validated
+provider adapters, and JSON research journals stored outside the repository.
+
+```mermaid
+flowchart LR
+    UI[React interface] --> API[Localhost Express API]
+    API --> Store[Local research journal]
+    API --> Sources[Yahoo / SEC / DuckDuckGo]
+    API --> AI[OpenAI: research and chat]
+    AI --> Evidence[Cited hypothesis + source checks]
+    Evidence --> UI
+```
+
+The browser never receives the provider key. Market retrieval and AI processing
+cross the local boundary as detailed in [Privacy / external processing](#privacy--external-processing).
 
 ## Quick start
 
@@ -27,6 +50,9 @@ npm run dev          # vite on http://127.0.0.1:5173, proxies /api to 8787
 ```
 
 ## Always-on (macOS launch agent)
+
+Optional: these commands apply only if you have already installed your own
+`local.civicfolio.plist`. The repository does not install a launch agent.
 
 ```bash
 launchctl load ~/Library/LaunchAgents/local.civicfolio.plist     # enable
@@ -68,7 +94,8 @@ Quotes as-of missing ⇒ timestamp shown as **unknown**, never "now". A failed s
 
 Although the app runs on localhost, AI research and LLM chat send your question (plus fetched market data and, inside a ticker thread, that thread's recent messages) to **OpenAI**, and — for research and chat — the raw question text to **DuckDuckGo**. No portfolio, positions, notes, or other threads are ever sent.
 
-`OPENAI_API_KEY` is read from server env only. `npm start` and `npm run dev` load the repository `.env`; the launchd-compatible fallback `~/.civicfolio/env` is also loaded, with existing process/repository environment values taking precedence. Neither file is tracked. The key is never sent to the browser or written into responses. With no key set, AI research and LLM chat fail immediately with an explicit error — no network call is attempted — and the deterministic engine keeps working fully offline.
+`OPENAI_API_KEY` is read from server env only. `npm start` and `npm run dev` load the repository `.env`; the launchd-compatible fallback `~/.civicfolio/env` is also loaded, with existing process/repository environment values taking precedence. Neither file is tracked. The key is never sent to the browser or written into responses. With no key set, AI research and LLM chat fail immediately with an explicit error — no network call is attempted — and local deterministic components remain available. Market screens still require
+their external data sources.
 
 ## Configuration
 
@@ -90,10 +117,17 @@ npm run typecheck
 npm run build
 ```
 
+Local validation on 2026-09-22: **113 tests passed**, plus typecheck, production
+build and isolated smoke checks. No paid model call was made.
+
 ## What is NOT here (by design)
 
-- No order placement, no broker connection, no credential storage
+- No real order placement, broker connection or brokerage credential storage
 - No real-time exchange feed (delayed public data only)
 - No outcome scoring / hit rates (one later price cannot validate a call)
 - No automatic refresh jobs beyond the launchd service itself
 - No multi-user anything — this is a single-user local tool
+
+## License
+
+No license file has been selected for this repository.

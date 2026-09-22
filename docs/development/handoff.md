@@ -1,3 +1,5 @@
+> Historical implementation/review record, not current operational instructions. See the [README](../../README.md).
+
 # Civicfolio — HANDOFF
 
 ## Current runtime

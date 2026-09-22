@@ -2,7 +2,7 @@
   "name": "civicfolio",
   "private": true,
   "version": "0.1.0",
-  "description": "Personal localhost investment research app: disclosure feed, source-cited research chat, paper portfolio.",
+  "description": "Local-first AI stock research with cited hypotheses, market context, and research journaling.",
   "type": "module",
   "scripts": {
     "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",

@@ -1,6 +1,6 @@
 # Archived initial build request (historical)
 
-> This file records Civicfolio's original milestone. It is not current setup or provider guidance; see `README.md` and `HANDOFF.md`.
+> This file records Civicfolio's original milestone. It is not current setup or provider guidance; see the [README](../../README.md) and [historical handoff](../development/handoff.md).
 
 Build Civicfolio as a polished, working personal localhost app. You are the GLM implementation worker under Astra's coordination. Implement, run and test it; do not only write a plan. Use a simple maintainable stack (React/Vite frontend with a local Node backend and file/SQLite persistence is appropriate). Inspect runtime availability first. Install ordinary project dependencies as needed. No external deployment, GitHub push, live financial transactions, or credential discovery.
 

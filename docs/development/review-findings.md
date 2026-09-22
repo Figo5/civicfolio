@@ -1,3 +1,5 @@
+> Historical implementation/review record, not current operational instructions. See the [README](../../README.md).
+
 # Desktop Claude review — reconcile before acceptance
 
 The reviewer inspected the backend during implementation. Verify each issue against current code; these are findings, not guaranteed current defects.

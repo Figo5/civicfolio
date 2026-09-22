@@ -1,3 +1,5 @@
+> Historical implementation/review record, not current operational instructions. See the [README](../../README.md).
+
 # Astra acceptance notes
 
 Review the running UI in Opera GX. Confirm that all navigation works, chat discloses its mode, and sample transactions are unmistakably synthetic. Do not display fictitious transactions under real politician names.
