@@ -130,4 +130,4 @@ build and isolated smoke checks. No paid model call was made.
 
 ## License
 
-No license file has been selected for this repository.
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Gio Fiore.
